@@ -36,6 +36,34 @@ inline bool PathEndsWithCaseInsensitive(std::string_view full, std::string_view 
     return true;
 }
 
+inline std::string_view ExtractScriptsSubpath(std::string_view p)
+{
+    if (p.empty())
+        return p;
+
+    if (p.length() >= 8)
+    {
+        std::string_view prefix = p.substr(0, 8);
+        if (PathEqualsCaseInsensitive(prefix, "scripts/") || PathEqualsCaseInsensitive(prefix, "scripts\\"))
+            return p;
+    }
+
+    for (size_t i = 0; i + 8 < p.length(); ++i)
+    {
+        char c0 = p[i];
+        if (c0 == '/' || c0 == '\\')
+        {
+            std::string_view sub = p.substr(i + 1, 8);
+            if (PathEqualsCaseInsensitive(sub, "scripts/") || PathEqualsCaseInsensitive(sub, "scripts\\"))
+            {
+                return p.substr(i + 1);
+            }
+        }
+    }
+
+    return {};
+}
+
 inline bool PathMatchesSection(std::string_view pathA, std::string_view pathB)
 {
     if (pathA.empty() || pathB.empty())
@@ -62,6 +90,36 @@ inline bool PathMatchesSection(std::string_view pathA, std::string_view pathB)
             char prevChar = pathB[offset - 1];
             if (prevChar == '/' || prevChar == '\\')
                 return true;
+        }
+    }
+
+    // Cross-environment / relative matching: if both contain "scripts/", match starting from "scripts/"
+    std::string_view subA = ExtractScriptsSubpath(pathA);
+    std::string_view subB = ExtractScriptsSubpath(pathB);
+    if (!subA.empty() && !subB.empty())
+    {
+        if (PathEqualsCaseInsensitive(subA, subB))
+            return true;
+
+        if (subA.length() > subB.length())
+        {
+            size_t offset = subA.length() - subB.length();
+            if (PathEndsWithCaseInsensitive(subA, subB))
+            {
+                char prevChar = subA[offset - 1];
+                if (prevChar == '/' || prevChar == '\\')
+                    return true;
+            }
+        }
+        else if (subB.length() > subA.length())
+        {
+            size_t offset = subB.length() - subA.length();
+            if (PathEndsWithCaseInsensitive(subB, subA))
+            {
+                char prevChar = subB[offset - 1];
+                if (prevChar == '/' || prevChar == '\\')
+                    return true;
+            }
         }
     }
 

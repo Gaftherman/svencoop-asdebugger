@@ -353,28 +353,17 @@ public:
         {
             auto& src = response.sources.emplace_back();
             src.name  = source.section;
-            if (source.section.rfind("__", 0) == 0 || (dbg->workspace && dbg->workspace->SectionIsVirtual(source.section)))
+            if (source.section.rfind("__", 0) == 0)
             {
                 src.sourceReference = source.ref;
             }
             else
             {
                 auto resolved = dbg->workspace->SectionToPath(source.section);
-                std::error_code ec;
-                bool isLocal = !resolved.empty() && std::filesystem::exists(resolved, ec);
-#ifndef _WIN32
-                static bool inDocker = std::filesystem::exists("/.dockerenv", ec) ||
-                                       std::filesystem::exists("/home/container", ec);
-                if (inDocker || !isLocal)
-                    src.sourceReference = source.ref;
-                else
-                    src.path = resolved;
-#else
-                if (isLocal)
+                if (!resolved.empty())
                     src.path = resolved;
                 else
                     src.sourceReference = source.ref;
-#endif
             }
         }
 
@@ -436,13 +425,23 @@ public:
     {
         dap::BreakpointLocationsResponse response{};
 
+        std::string sectionName;
         if (request.source.name.has_value())
+        {
+            sectionName = request.source.name.value();
+        }
+        else if (request.source.path.has_value() && dbg->workspace)
+        {
+            sectionName = dbg->workspace->PathToSection(request.source.path.value());
+        }
+
+        if (!sectionName.empty())
         {
             std::scoped_lock lock(dbg->mutex);
             if (dbg->workspace && dbg->workspace->potential_breakpoints.empty())
                 dbg->workspace->CompileBreakpointPositions();
 
-            if (auto linecols = dbg->workspace->potential_breakpoints.find(request.source.name.value());
+            if (auto linecols = dbg->workspace->potential_breakpoints.find(sectionName);
                 linecols != dbg->workspace->potential_breakpoints.end())
             {
                 // FIXME: STL equal_range maybe?
@@ -486,6 +485,24 @@ public:
         {
             auto rel     = dbg->workspace->PathToSection(request.source.path.value());
             auto pathstr = std::filesystem::path(rel).generic_string();
+
+            // Additional fallback: if PathToSection returned the raw path unchanged,
+            // try suffix matching against known sections (handles cross-OS path mismatch)
+            if (pathstr == std::filesystem::path(request.source.path.value()).generic_string() && dbg->workspace)
+            {
+                std::string needle = pathstr;
+                std::replace(needle.begin(), needle.end(), '\\', '/');
+                for (auto& sec : dbg->workspace->sections)
+                {
+                    std::string secNorm(sec.section);
+                    std::replace(secNorm.begin(), secNorm.end(), '\\', '/');
+                    if (PathMatchesSection(secNorm, needle))
+                    {
+                        pathstr = secNorm;
+                        break;
+                    }
+                }
+            }
 
             std::scoped_lock lock(dbg->mutex);
 
@@ -677,12 +694,7 @@ public:
                 bool isVirtual = dbg->workspace && dbg->workspace->SectionIsVirtual(stack.section);
                 auto resolved  = dbg->workspace ? dbg->workspace->SectionToPath(stack.section) : std::string(stack.section);
 
-                std::error_code ec;
-                bool isLocal = !isVirtual && !resolved.empty() && std::filesystem::exists(resolved, ec);
-#ifndef _WIN32
-                static bool inDocker = std::filesystem::exists("/.dockerenv", ec) ||
-                                       std::filesystem::exists("/home/container", ec);
-                if (inDocker || !isLocal)
+                if (isVirtual || resolved.empty())
                 {
                     src.sourceReference = secRef > 0 ? (int64_t)secRef : ((int64_t)stack.id + 1000);
                 }
@@ -690,16 +702,6 @@ public:
                 {
                     src.path = resolved;
                 }
-#else
-                if (isLocal)
-                {
-                    src.path = resolved;
-                }
-                else
-                {
-                    src.sourceReference = secRef > 0 ? (int64_t)secRef : ((int64_t)stack.id + 1000);
-                }
-#endif
                 frame.source = std::move(src);
             }
             else

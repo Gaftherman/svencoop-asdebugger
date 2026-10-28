@@ -66,6 +66,17 @@ std::string asSCWorkspace::PathToSection(const std::string_view v) const
             return std::string(sec.section);
     }
 
+    // 5. Fallback: match via scripts/ subpath
+    std::string_view scriptsSub = ExtractScriptsSubpath(pathStr);
+    if (!scriptsSub.empty())
+    {
+        for (const auto& sec : sections)
+        {
+            if (PathMatchesSection(sec.section, scriptsSub))
+                return std::string(sec.section);
+        }
+    }
+
     return pathStr;
 }
 
@@ -115,6 +126,13 @@ std::string asSCWorkspace::SectionToPath(const std::string_view v) const
     }
 
     // 4. Try sibling directories like svencoop_event_bts, svencoop_addon, svencoop_downloads
+#ifndef _WIN32
+    // Skip if sectionStr looks like an absolute Windows path (C:/... or D:/...)
+    bool looksLikeWindowsPath = sectionStr.length() > 2 && std::isalpha((unsigned char)sectionStr[0]) && sectionStr[1] == ':';
+    if (looksLikeWindowsPath)
+        return {};
+#endif
+
     std::filesystem::path parentDir = std::filesystem::path(base_path).parent_path();
     if (!parentDir.empty() && std::filesystem::exists(parentDir, ec))
     {

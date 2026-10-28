@@ -243,7 +243,8 @@ size_t asIDBObjectIteratorHelper::CalculateLength(asIScriptContext* ctx) const
     ctx->PushState();
 
     size_t length = 0;
-    for (auto it = Begin(ctx); !End(ctx, it); length++, it = Next(ctx, it));
+    constexpr size_t MAX_ITER = 10000;
+    for (auto it = Begin(ctx); !End(ctx, it) && length < MAX_ITER; length++, it = Next(ctx, it));
 
     ctx->PopState();
     return length;

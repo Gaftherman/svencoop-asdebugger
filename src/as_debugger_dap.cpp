@@ -353,17 +353,28 @@ public:
         {
             auto& src = response.sources.emplace_back();
             src.name  = source.section;
-            if (source.section.rfind("__", 0) == 0)
+            if (source.section.rfind("__", 0) == 0 || (dbg->workspace && dbg->workspace->SectionIsVirtual(source.section)))
             {
                 src.sourceReference = source.ref;
             }
             else
             {
                 auto resolved = dbg->workspace->SectionToPath(source.section);
-                if (!resolved.empty())
+                std::error_code ec;
+                bool isLocal = !resolved.empty() && std::filesystem::exists(resolved, ec);
+#ifndef _WIN32
+                static bool inDocker = std::filesystem::exists("/.dockerenv", ec) ||
+                                       std::filesystem::exists("/home/container", ec);
+                if (inDocker || !isLocal)
+                    src.sourceReference = source.ref;
+                else
+                    src.path = resolved;
+#else
+                if (isLocal)
                     src.path = resolved;
                 else
                     src.sourceReference = source.ref;
+#endif
             }
         }
 
@@ -379,8 +390,30 @@ public:
             auto name = request.source->name.value();
             if (dbg->workspace)
             {
-                response.content = dbg->workspace->SectionSource(name);
-                return response;
+                auto content = dbg->workspace->SectionSource(name);
+                if (!content.empty())
+                {
+                    response.content = content;
+                    return response;
+                }
+            }
+        }
+
+        if (request.source && request.source->path)
+        {
+            auto p = request.source->path.value();
+            if (dbg->workspace)
+            {
+                auto sec = dbg->workspace->PathToSection(p);
+                if (!sec.empty())
+                {
+                    auto content = dbg->workspace->SectionSource(sec);
+                    if (!content.empty())
+                    {
+                        response.content = content;
+                        return response;
+                    }
+                }
             }
         }
 
@@ -630,20 +663,43 @@ public:
                 frame.line   = stack.row;
                 frame.column = stack.column;
                 dap::Source src;
-                if (dbg->workspace && dbg->workspace->SectionIsVirtual(stack.section))
+                src.name = std::string(stack.section);
+
+                uint64_t secRef = 0;
+                if (dbg->workspace)
                 {
-                    src.sourceReference = (int64_t)stack.id + 1000;
-                    src.name            = std::string(stack.section);
+                    dbg->workspace->AddSection(stack.section);
+                    auto it = dbg->workspace->sections.find(stack.section);
+                    if (it != dbg->workspace->sections.end())
+                        secRef = it->ref;
+                }
+
+                bool isVirtual = dbg->workspace && dbg->workspace->SectionIsVirtual(stack.section);
+                auto resolved  = dbg->workspace ? dbg->workspace->SectionToPath(stack.section) : std::string(stack.section);
+
+                std::error_code ec;
+                bool isLocal = !isVirtual && !resolved.empty() && std::filesystem::exists(resolved, ec);
+#ifndef _WIN32
+                static bool inDocker = std::filesystem::exists("/.dockerenv", ec) ||
+                                       std::filesystem::exists("/home/container", ec);
+                if (inDocker || !isLocal)
+                {
+                    src.sourceReference = secRef > 0 ? (int64_t)secRef : ((int64_t)stack.id + 1000);
                 }
                 else
                 {
-                    auto resolved = dbg->workspace ? dbg->workspace->SectionToPath(stack.section) : std::string(stack.section);
-                    if (!resolved.empty())
-                        src.path = resolved;
-                    else
-                        src.sourceReference = (int64_t)stack.id + 1000;
-                    src.name = std::string(stack.section);
+                    src.path = resolved;
                 }
+#else
+                if (isLocal)
+                {
+                    src.path = resolved;
+                }
+                else
+                {
+                    src.sourceReference = secRef > 0 ? (int64_t)secRef : ((int64_t)stack.id + 1000);
+                }
+#endif
                 frame.source = std::move(src);
             }
             else

@@ -1084,6 +1084,18 @@ public:
     void* objPtr = var->address.ResolveAs<void>();
     if (objPtr != nullptr)
     {
+        if (ctx && ctx->GetState() != asEXECUTION_EXCEPTION)
+        {
+            dbg.internal_execution = true;
+            asIDBObjectIteratorHelper it(type, objPtr);
+            if (it)
+            {
+                size_t length = it.CalculateLength(ctx);
+                var->value    = fmt::format("{} elements ({})", length, var->typeName);
+            }
+            dbg.internal_execution = false;
+        }
+
         if (var->value.empty())
             var->value = fmt::format("{{{}}}", var->typeName);
     }
@@ -1184,6 +1196,9 @@ bool asIDBObjectTypeEvaluator::CanExpand(asIDBVariable::Ptr var) const
     if (type->GetPropertyCount())
         return true;
 
+    if (type->GetMethodByName("opForBegin"))
+        return true;
+
     for (asUINT n = 0; n < type->GetMethodCount(); n++)
     {
         asIScriptFunction* function = type->GetMethodByIndex(n, true);
@@ -1209,9 +1224,8 @@ void asIDBObjectTypeEvaluator::QueryVariableForEach(asIDBVariable::Ptr var, int 
     auto& cache = *dbg.cache;
     auto  ctx   = cache.ctx;
 
-    // Never invoke script execution if context is currently active / suspended (prevents infinite loops and crashes)
-    if (!ctx || ctx->GetState() == asEXECUTION_EXCEPTION ||
-        ctx->GetState() == asEXECUTION_ACTIVE || ctx->GetState() == asEXECUTION_SUSPENDED)
+    // Never invoke script execution if context is currently in exception state
+    if (!ctx || ctx->GetState() == asEXECUTION_EXCEPTION)
         return;
 
     auto  type   = ctx->GetEngine()->GetTypeInfoById(var->address.typeId);
@@ -1235,7 +1249,9 @@ void asIDBObjectTypeEvaluator::QueryVariableForEach(asIDBVariable::Ptr var, int 
     int  elementId    = 0;
     bool multiElement = index == -1 && it.opForValues.size() > 1;
 
-    while (true)
+    size_t iterCount = 0;
+    constexpr size_t MAX_FOREACH_ITER = 1000;
+    while (iterCount++ < MAX_FOREACH_ITER)
     {
         if (it.End(ctx, itValue))
             break;

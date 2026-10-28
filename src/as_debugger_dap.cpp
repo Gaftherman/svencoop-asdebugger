@@ -424,12 +424,10 @@ public:
                     else if (request.endColumn.has_value() && lc.col > request.endColumn.value())
                         continue;
 
-                    dap::BreakpointLocation bp = response.breakpoints.emplace_back();
+                    auto& bp = response.breakpoints.emplace_back();
 
                     bp.line   = lc.line;
                     bp.column = lc.col;
-
-                    response.breakpoints.push_back(bp);
                 }
             }
         }
@@ -458,16 +456,22 @@ public:
 
             std::scoped_lock lock(dbg->mutex);
 
-            dbg->workspace->AddSection(pathstr);
-
-            if (auto it = dbg->breakpoints.find(pathstr); it != dbg->breakpoints.end())
-                dbg->breakpoints.erase(it);
-
-            if (request.breakpoints && !request.breakpoints->empty())
+            auto secIt = dbg->workspace->sections.find(pathstr);
+            if (secIt == dbg->workspace->sections.end())
             {
-                auto& pathstrptr = *dbg->workspace->sections.find(pathstr);
-                auto& positions  = dbg->workspace->potential_breakpoints[pathstrptr.section];
-                auto  it         = dbg->breakpoints.find(pathstrptr.section);
+                dbg->workspace->AddSection(pathstr);
+                secIt = dbg->workspace->sections.find(pathstr);
+            }
+
+            std::string_view secKey = (secIt != dbg->workspace->sections.end()) ? std::string_view(secIt->section) : std::string_view(pathstr);
+            dbg->breakpoints.erase(secKey);
+            dbg->breakpoints.erase(pathstr);
+
+            if (request.breakpoints && !request.breakpoints->empty() && secIt != dbg->workspace->sections.end())
+            {
+                auto& positions = dbg->workspace->potential_breakpoints[secIt->section];
+                auto& bpList    = dbg->breakpoints[secIt->section];
+                bpList.clear();
 
                 for (auto& bp : *request.breakpoints)
                 {
@@ -544,7 +548,7 @@ public:
                         placed_bp.verified = true;
                     }
 
-                    it->second.push_back(std::move(newBp));
+                    bpList.push_back(std::move(newBp));
                 }
             }
         }

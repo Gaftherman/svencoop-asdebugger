@@ -134,6 +134,26 @@ inline void* SafeReadPointer(const void* ptr)
 #endif
 }
 
+inline int32_t SafeReadInt32(const void* ptr, int32_t defaultVal = 0)
+{
+    if (!ptr)
+        return defaultVal;
+#if defined(_WIN32)
+    __try
+    {
+        return *reinterpret_cast<const int32_t*>(ptr);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return defaultVal;
+    }
+#else
+    if (!SafeProbeMemoryReadable(ptr, sizeof(int32_t)))
+        return defaultVal;
+    return *reinterpret_cast<const int32_t*>(ptr);
+#endif
+}
+
 inline bool SafeReadCString(const void* ptr, char* out_buf, size_t buf_size, size_t& out_len, bool& out_truncated)
 {
     if (!ptr)

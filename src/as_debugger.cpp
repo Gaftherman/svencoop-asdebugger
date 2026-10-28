@@ -253,20 +253,39 @@ void* asIDBCache::ResolvePropertyAddress(const asIDBVarAddr& id, int propertyInd
 
     if (id.typeId & asTYPEID_SCRIPTOBJECT)
     {
+        if (!SafeProbeMemoryReadable(base, sizeof(void*)))
+            return nullptr;
+#if defined(_WIN32)
+        __try
+        {
+            asIScriptObject* obj = reinterpret_cast<asIScriptObject*>(base);
+            return obj->GetAddressOfProperty(propertyIndex);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return nullptr;
+        }
+#else
         asIScriptObject* obj = reinterpret_cast<asIScriptObject*>(base);
         return obj->GetAddressOfProperty(propertyIndex);
+#endif
     }
 
     // indirect changes our ptr to
     // *(object + compositeOffset) + offset
     if (isCompositeIndirect)
     {
-        uint8_t** indirectPtr = reinterpret_cast<uint8_t**>(base + compositeOffset);
-        if (!indirectPtr || !*indirectPtr)
+        if (!SafeProbeMemoryReadable(base + compositeOffset, sizeof(void*)))
+            return nullptr;
+        void* indirect = SafeReadPointer(base + compositeOffset);
+        if (!indirect)
             return nullptr;
 
-        return *indirectPtr + offset;
+        return static_cast<uint8_t*>(indirect) + offset;
     }
+
+    if (!SafeProbeMemoryReadable(base + offset + compositeOffset, sizeof(void*)))
+        return nullptr;
 
     return base + offset + compositeOffset;
 }
@@ -710,14 +729,14 @@ void* asIDBCache::ResolvePropertyAddress(const asIDBVarAddr& id, int propertyInd
         globals->SetRefId();
 }
 
-#ifdef _WIN32
-#    include <windows.h>
-
 struct DictEntryRaw
 {
     const CString* keyObj;
     void*          node;
 };
+
+#ifdef _WIN32
+#    include <windows.h>
 
 static bool SafeGetDictSize(CScriptDictionary* dict, unsigned int& out_count)
 {
@@ -1063,33 +1082,10 @@ public:
     var->expandable = CanExpand(var);
 
     void* objPtr = var->address.ResolveAs<void>();
-    if (ctx->GetState() != asEXECUTION_EXCEPTION && objPtr != nullptr)
+    if (objPtr != nullptr)
     {
-        asIDBObjectIteratorHelper it(type, objPtr);
-
-        if (!it)
-        {
-            if (!it.error.empty())
-            {
-                var->value = std::string(it.error);
-                return;
-            }
-
-            if (var->value.empty())
-                var->value = fmt::format("{{{}}}", var->typeName);
-        }
-        else
-        {
-            dbg.internal_execution = true;
-            size_t numElements     = it.CalculateLength(ctx);
-            dbg.internal_execution = false;
-
-            if (var->value.empty())
-                var->value = fmt::format("{} elements", numElements);
-
-            if (numElements)
-                var->expandable = true;
-        }
+        if (var->value.empty())
+            var->value = fmt::format("{{{}}}", var->typeName);
     }
 }
 
@@ -1213,7 +1209,9 @@ void asIDBObjectTypeEvaluator::QueryVariableForEach(asIDBVariable::Ptr var, int 
     auto& cache = *dbg.cache;
     auto  ctx   = cache.ctx;
 
-    if (ctx->GetState() == asEXECUTION_EXCEPTION)
+    // Never invoke script execution if context is currently active / suspended (prevents infinite loops and crashes)
+    if (!ctx || ctx->GetState() == asEXECUTION_EXCEPTION ||
+        ctx->GetState() == asEXECUTION_ACTIVE || ctx->GetState() == asEXECUTION_SUSPENDED)
         return;
 
     auto  type   = ctx->GetEngine()->GetTypeInfoById(var->address.typeId);
@@ -1455,9 +1453,9 @@ void asIDBDictionaryTypeEvaluator::Expand(asIDBVariable::Ptr var) const
         }
 
         void* node = entries[i].node;
-        if (node)
+        if (node && SafeProbeMemoryReadable(static_cast<char*>(node) + 0x30, 0x10))
         {
-            int   valTypeId = *reinterpret_cast<int*>(static_cast<char*>(node) + 0x38);
+            int   valTypeId = SafeReadInt32(static_cast<char*>(node) + 0x38);
             void* valAddr   = static_cast<char*>(node) + 0x30;
 
             if ((valTypeId & asTYPEID_MASK_OBJECT) && !(valTypeId & asTYPEID_OBJHANDLE))

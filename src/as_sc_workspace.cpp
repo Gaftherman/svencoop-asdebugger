@@ -114,6 +114,41 @@ std::string asSCWorkspace::SectionToPath(const std::string_view v) const
             return pluginsPath;
     }
 
+    // 4. Try sibling directories like svencoop_event_bts, svencoop_addon, svencoop_downloads
+    std::filesystem::path parentDir = std::filesystem::path(base_path).parent_path();
+    if (!parentDir.empty() && std::filesystem::exists(parentDir, ec))
+    {
+        for (const auto& entry : std::filesystem::directory_iterator(parentDir, ec))
+        {
+            if (entry.is_directory(ec))
+            {
+                std::string dirName = entry.path().filename().string();
+                if (dirName.rfind("svencoop", 0) == 0 && dirName != "svencoop")
+                {
+                    std::string cand = (entry.path() / sectionStr).generic_string();
+                    if (std::filesystem::exists(cand, ec))
+                        return cand;
+
+                    cand = (entry.path() / "scripts" / sectionStr).generic_string();
+                    if (std::filesystem::exists(cand, ec))
+                        return cand;
+
+                    cand = (entry.path() / "scripts" / "maps" / sectionStr).generic_string();
+                    if (std::filesystem::exists(cand, ec))
+                        return cand;
+
+                    if (sectionStr.rfind("scripts/", 0) == 0)
+                    {
+                        std::string rel = sectionStr.substr(8);
+                        cand = (entry.path() / "scripts" / "maps" / rel).generic_string();
+                        if (std::filesystem::exists(cand, ec))
+                            return cand;
+                    }
+                }
+            }
+        }
+    }
+
     return {};
 }
 

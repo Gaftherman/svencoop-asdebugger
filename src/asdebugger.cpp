@@ -75,6 +75,28 @@ void ASDebug_Log(const char* fmt, ...)
 }
 
 static int s_ExecuteCount = 0;
+std::atomic<asIScriptContext*> g_ActiveExecutingContext{nullptr};
+
+void NotifyEngineAlert(int atype, const char* msg)
+{
+    if (!g_Debugger || !msg)
+        return;
+
+    asIScriptContext* ctx = g_ActiveExecutingContext.load(std::memory_order_acquire);
+    if (!ctx)
+        return;
+
+    if (std::strstr(msg, "Angelscript:") || std::strstr(msg, "AngelScript:"))
+    {
+        if (std::strstr(msg, "ERROR:") || std::strstr(msg, "error:") ||
+            std::strstr(msg, "invalid") || std::strstr(msg, "Failed") ||
+            std::strstr(msg, "Exception"))
+        {
+            g_Debugger->HandleNativeBindingError(ctx, msg);
+        }
+    }
+}
+
 #ifdef _WIN32
 static int __fastcall Hooked_Execute(asIScriptContext* pThis, void* /*dummy*/)
 #else
@@ -87,7 +109,11 @@ static int Hooked_Execute(asIScriptContext* pThis)
         g_Debugger->HookContext(pThis, true);
     }
 
+    asIScriptContext* prevCtx = g_ActiveExecutingContext.exchange(pThis, std::memory_order_acq_rel);
+
     int ret = g_pfnOriginalExecute(pThis);
+
+    g_ActiveExecutingContext.store(prevCtx, std::memory_order_release);
 
     // Only acquire mutex if this context was the one being stepped
     if (g_Debugger && pThis == g_Debugger->stepping_context)

@@ -15,6 +15,8 @@
 #include <unordered_set>
 
 #include "as_helpers.h"
+#include "as_safe_memory.h"
+#include "as_expr_ast.h"
 #include <asext_api.h>
 #include <std_string.h>
 
@@ -444,12 +446,17 @@ public:
 
 struct asIDBBreakpoint
 {
-    int                line;
-    std::optional<int> column;
-    std::string        condition;
-    std::string        hitCondition;
-    std::string        logMessage;
-    mutable int        hitCount = 0;
+    int                   line;
+    std::optional<int>    column;
+    std::string           condition;
+    std::string           hitCondition;
+    std::string           logMessage;
+    mutable int           hitCount = 0;
+    as_expr::NodePtr      conditionAst;
+    std::string           conditionError;
+    as_expr::HitCondition hitRule;
+    as_expr::LogTemplate  logTemplate;
+    mutable bool          warnedError = false;
 };
 
 using asIDBSectionBreakpoints = std::vector<asIDBBreakpoint>;
@@ -635,9 +642,16 @@ public:
     asIDBSectionFunctionBreakpoints function_breakpoints;
 
     // Fast lookup caches for LineCallback to avoid any work on sections without breakpoints
-    std::unordered_set<std::string> bp_section_cache;
-    std::unordered_set<std::string> bp_negative_cache;
-    void                            ClearBreakpointCaches();
+    std::unordered_set<std::string>       bp_section_cache;
+    std::unordered_set<std::string>       bp_negative_cache;
+    std::array<std::atomic<uint64_t>, 64> line_bitmap{};
+    void                                  ClearBreakpointCaches();
+    void                                  RebuildLineBitmapLocked();
+
+    std::string last_exception_description;
+    std::string last_exception_callstack;
+    bool        is_exception_break = false;
+    void        HandleNativeBindingError(asIScriptContext* ctx, const char* msg);
 
     // cache for the current active broken state.
     // the cache is only kept for the duration of

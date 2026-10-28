@@ -57,6 +57,10 @@ public:
             response.supportsBreakpointLocationsRequest = true;
             response.supportsLoadedSourcesRequest       = true;
             response.supportsReadMemoryRequest          = true;
+            response.supportsWriteMemoryRequest         = true;
+            response.supportsDisassembleRequest         = true;
+            response.supportsSteppingGranularity        = true;
+            response.supportsInstructionBreakpoints     = true;
             response.supportsExceptionInfoRequest       = true;
             response.supportsConditionalBreakpoints     = true;
             response.supportsHitConditionalBreakpoints  = true;
@@ -105,6 +109,10 @@ public:
         session->registerHandler(
             [&](const dap::ReadMemoryRequest& response) { return this->HandleRequest(response); });
         session->registerHandler(
+            [&](const dap::WriteMemoryRequest& response) { return this->HandleRequest(response); });
+        session->registerHandler(
+            [&](const dap::DisassembleRequest& response) { return this->HandleRequest(response); });
+        session->registerHandler(
             [&](const dap::ExceptionInfoRequest& response) { return this->HandleRequest(response); });
 
         session->registerSentHandler(
@@ -119,30 +127,194 @@ public:
     {
         dap::ReadMemoryResponse response{};
 
-        uintptr_t ptr;
-        std::from_chars(request.memoryReference.c_str(), request.memoryReference.c_str() + request.memoryReference.size(), ptr);
+        uintptr_t targetAddr = 0;
+        if (request.memoryReference.rfind("0x", 0) == 0 || request.memoryReference.rfind("0X", 0) == 0)
+        {
+            targetAddr = std::strtoull(request.memoryReference.c_str() + 2, nullptr, 16);
+        }
+        else
+        {
+            targetAddr = std::strtoull(request.memoryReference.c_str(), nullptr, 10);
+        }
 
-        asIDBVariable* var = reinterpret_cast<asIDBVariable*>(ptr);
-
-        uint8_t* data = var->address.ResolveAs<uint8_t>();
-        // FIXME: engine?
-        size_t   size     = var->address.GetSize(dbg->cache->ctx->GetEngine());
-        uint8_t* data_end = data + size;
-
-        int64_t offset = request.offset.has_value() ? (int64_t)request.offset.value() : 0;
+        int64_t offset = request.offset.has_value() ? static_cast<int64_t>(request.offset.value()) : 0;
         int64_t count  = request.count;
-
-        data += offset;
-
-        uint8_t* end = (std::min)(data_end, data + count);
-
-        if (!count || !(end - data) || data >= end)
+        if (count <= 0 || targetAddr == 0)
             return response;
 
-        std::string buf((intptr_t)(end - data), '\0');
-        memcpy(buf.data(), data, buf.size());
-        response.address = fmt::format("{}", reinterpret_cast<uintptr_t>(data));
+        uintptr_t readAddr = targetAddr + offset;
+        if (!SafeProbeMemoryReadable(reinterpret_cast<const void*>(readAddr), static_cast<size_t>(count)))
+        {
+            response.unreadableBytes = count;
+            return response;
+        }
+
+        std::string buf(static_cast<size_t>(count), '\0');
+        std::memcpy(buf.data(), reinterpret_cast<const void*>(readAddr), static_cast<size_t>(count));
+        response.address = fmt::format("0x{:x}", readAddr);
         response.data    = base64::to_base64(buf);
+        return response;
+    }
+
+    dap::WriteMemoryResponse HandleRequest(const dap::WriteMemoryRequest& request)
+    {
+        dap::WriteMemoryResponse response{};
+
+        uintptr_t targetAddr = 0;
+        if (request.memoryReference.rfind("0x", 0) == 0 || request.memoryReference.rfind("0X", 0) == 0)
+        {
+            targetAddr = std::strtoull(request.memoryReference.c_str() + 2, nullptr, 16);
+        }
+        else
+        {
+            targetAddr = std::strtoull(request.memoryReference.c_str(), nullptr, 10);
+        }
+
+        int64_t   offset    = request.offset.has_value() ? static_cast<int64_t>(request.offset.value()) : 0;
+        uintptr_t writeAddr = targetAddr + offset;
+
+        std::vector<uint8_t> bytes = SafeFromBase64(request.data);
+        if (bytes.empty() || writeAddr == 0)
+            return response;
+
+        if (!SafeProbeMemoryWritable(reinterpret_cast<void*>(writeAddr), bytes.size()))
+        {
+            return response;
+        }
+
+        std::memcpy(reinterpret_cast<void*>(writeAddr), bytes.data(), bytes.size());
+        response.bytesWritten = static_cast<int64_t>(bytes.size());
+        response.offset       = offset;
+        return response;
+    }
+
+    dap::DisassembleResponse HandleRequest(const dap::DisassembleRequest& request)
+    {
+        dap::DisassembleResponse response{};
+
+        uintptr_t baseAddr = 0;
+        if (request.memoryReference.rfind("0x", 0) == 0 || request.memoryReference.rfind("0X", 0) == 0)
+        {
+            baseAddr = std::strtoull(request.memoryReference.c_str() + 2, nullptr, 16);
+        }
+        else
+        {
+            baseAddr = std::strtoull(request.memoryReference.c_str(), nullptr, 10);
+        }
+
+        int64_t   byteOffset = request.offset.has_value() ? static_cast<int64_t>(request.offset.value()) : 0;
+        uintptr_t startAddr  = baseAddr + byteOffset;
+
+        int64_t count = request.instructionCount > 0 ? static_cast<int64_t>(request.instructionCount) : static_cast<int64_t>(1);
+        if (count > 500)
+            count = 500;
+
+        asIScriptEngine* engine = (dbg->cache && dbg->cache->ctx) ? dbg->cache->ctx->GetEngine() : nullptr;
+        const asDWORD*   bc     = reinterpret_cast<const asDWORD*>(startAddr);
+
+        for (int64_t i = 0; i < count; ++i)
+        {
+            auto& inst   = response.instructions.emplace_back();
+            inst.address = fmt::format("0x{:x}", reinterpret_cast<uintptr_t>(bc));
+
+            if (!SafeProbeMemoryReadable(bc, sizeof(asDWORD)))
+            {
+                inst.presentationHint = "invalid";
+                inst.instruction      = "???";
+                break;
+            }
+
+            asEBCInstr op = static_cast<asEBCInstr>(*reinterpret_cast<const asBYTE*>(bc));
+            if (static_cast<size_t>(op) >= 256 || asBCInfo[op].type == asBCTYPE_INFO)
+            {
+                inst.presentationHint = "invalid";
+                inst.instruction      = fmt::format("unknown 0x{:02x}", static_cast<int>(*reinterpret_cast<const asBYTE*>(bc)));
+                bc++;
+                continue;
+            }
+
+            int instrSize = asBCTypeSize[asBCInfo[op].type];
+            if (instrSize <= 0)
+                instrSize = 1;
+
+            if (!SafeProbeMemoryReadable(bc, instrSize * sizeof(asDWORD)))
+            {
+                inst.presentationHint = "invalid";
+                inst.instruction      = "???";
+                break;
+            }
+
+            std::string disasm = asBCInfo[op].name;
+            switch (asBCInfo[op].type)
+            {
+                case asBCTYPE_NO_ARG:
+                    break;
+                case asBCTYPE_W_ARG:
+                case asBCTYPE_wW_ARG:
+                case asBCTYPE_rW_ARG:
+                    disasm += fmt::format(" r{}", asBC_SWORDARG0(bc));
+                    break;
+                case asBCTYPE_DW_ARG:
+                    if (op == asBC_CALL || op == asBC_CALLSYS || op == asBC_CALLBND)
+                    {
+                        int funcId = asBC_INTARG(bc);
+                        if (engine)
+                        {
+                            auto targetFunc = engine->GetFunctionById(funcId);
+                            if (targetFunc)
+                                disasm += fmt::format(" {} ({})", funcId, targetFunc->GetDeclaration());
+                            else
+                                disasm += fmt::format(" {}", funcId);
+                        }
+                        else
+                            disasm += fmt::format(" {}", funcId);
+                    }
+                    else if (op == asBC_JMP || op == asBC_JZ || op == asBC_JNZ || op == asBC_JS ||
+                             op == asBC_JNS || op == asBC_JP || op == asBC_JNP)
+                    {
+                        int jmpOffset = asBC_INTARG(bc);
+                        disasm += fmt::format(" {:+d} (-> 0x{:x})", jmpOffset, reinterpret_cast<uintptr_t>(bc + jmpOffset));
+                    }
+                    else
+                    {
+                        disasm += fmt::format(" 0x{:x}", asBC_DWORDARG(bc));
+                    }
+                    break;
+                case asBCTYPE_rW_DW_ARG:
+                case asBCTYPE_wW_DW_ARG:
+                case asBCTYPE_W_DW_ARG:
+                    disasm += fmt::format(" r{}, 0x{:x}", asBC_SWORDARG0(bc), asBC_DWORDARG(bc));
+                    break;
+                case asBCTYPE_wW_rW_ARG:
+                case asBCTYPE_rW_rW_ARG:
+                case asBCTYPE_wW_W_ARG:
+                    disasm += fmt::format(" r{}, r{}", asBC_SWORDARG0(bc), asBC_SWORDARG1(bc));
+                    break;
+                case asBCTYPE_wW_rW_rW_ARG:
+                    disasm += fmt::format(" r{}, r{}, r{}", asBC_SWORDARG0(bc), asBC_SWORDARG1(bc), asBC_SWORDARG2(bc));
+                    break;
+                case asBCTYPE_QW_ARG:
+                    disasm += fmt::format(" 0x{:x}", asBC_QWORDARG(bc));
+                    break;
+                default:
+                    disasm += " <operands>";
+                    break;
+            }
+
+            inst.instruction = disasm;
+
+            std::string rawBytes;
+            const uint8_t* bytePtr = reinterpret_cast<const uint8_t*>(bc);
+            for (int b = 0; b < instrSize * static_cast<int>(sizeof(asDWORD)); ++b)
+            {
+                rawBytes += fmt::format("{:02x} ", bytePtr[b]);
+            }
+            if (!rawBytes.empty())
+                rawBytes.pop_back();
+            inst.instructionBytes = rawBytes;
+
+            bc += instrSize;
+        }
 
         return response;
     }
@@ -152,9 +324,13 @@ public:
         dap::ExceptionInfoResponse response{};
 
         response.breakMode   = "always";
-        response.description = dbg->cache->ctx->GetExceptionString();
+        std::string desc = !dbg->last_exception_description.empty() ? dbg->last_exception_description :
+            ((dbg->cache && dbg->cache->ctx && dbg->cache->ctx->GetExceptionString()) ? dbg->cache->ctx->GetExceptionString() : "Exception");
+
+        response.description = desc;
         dap::ExceptionDetails details{};
-        details.message      = dbg->cache->ctx->GetExceptionString();
+        details.message      = desc;
+        details.stackTrace   = dbg->last_exception_callstack;
         response.details     = details;
         response.exceptionId = "exception";
 
@@ -322,16 +498,53 @@ public:
                     placed_bp.line = closest.line;
                     if (bp.column.has_value())
                         placed_bp.column = closest.col;
-                    placed_bp.verified = true;
-
-                    if (it == dbg->breakpoints.end())
-                        it = dbg->breakpoints.insert({pathstrptr.section, asIDBSectionBreakpoints{}}).first;
-
                     std::optional<int> colOpt  = bp.column.has_value() ? std::optional<int>((int)closest.col) : std::nullopt;
                     std::string        cond    = bp.condition.has_value() ? std::string(bp.condition.value()) : "";
                     std::string        hitCond = bp.hitCondition.has_value() ? std::string(bp.hitCondition.value()) : "";
                     std::string        logMsg  = bp.logMessage.has_value() ? std::string(bp.logMessage.value()) : "";
-                    it->second.push_back({(int)closest.line, colOpt, cond, hitCond, logMsg, 0});
+
+                    asIDBBreakpoint newBp;
+                    newBp.line         = (int)closest.line;
+                    newBp.column       = colOpt;
+                    newBp.condition    = cond;
+                    newBp.hitCondition = hitCond;
+                    newBp.logMessage   = logMsg;
+                    newBp.hitCount     = 0;
+                    newBp.warnedError  = false;
+
+                    if (!cond.empty())
+                    {
+                        as_expr::Parser parser(cond);
+                        auto res = parser.Parse();
+                        if (res.has_value())
+                        {
+                            newBp.conditionAst = std::move(res.value());
+                        }
+                        else
+                        {
+                            newBp.conditionError = res.error();
+                        }
+                    }
+                    if (!hitCond.empty())
+                    {
+                        newBp.hitRule = as_expr::HitCondition::Parse(hitCond);
+                    }
+                    if (!logMsg.empty())
+                    {
+                        newBp.logTemplate = as_expr::LogTemplate::Parse(logMsg);
+                    }
+
+                    if (!newBp.conditionError.empty())
+                    {
+                        placed_bp.verified = false;
+                        placed_bp.message  = newBp.conditionError;
+                    }
+                    else
+                    {
+                        placed_bp.verified = true;
+                    }
+
+                    it->second.push_back(std::move(newBp));
                 }
             }
         }
@@ -432,6 +645,10 @@ public:
             else
                 frame.presentationHint = "label";
             frame.name = stack.declaration;
+            if (stack.func && stack.func->GetByteCode())
+            {
+                frame.instructionPointerReference = fmt::format("0x{:x}", reinterpret_cast<uintptr_t>(stack.func->GetByteCode()));
+            }
         }
 
         return response;
@@ -490,6 +707,17 @@ public:
                 scope.namedVariables     = stack.scope.registers->namedProps.size();
                 scope.indexedVariables   = stack.scope.registers->indexedProps.size();
                 scope.variablesReference = stack.scope.registers->expandRefId.value_or(0);
+            }
+
+            // 4. VM Registers & Execution State
+            {
+                auto& regScope              = response.scopes.emplace_back();
+                regScope.name               = "Registers";
+                regScope.presentationHint   = "registers";
+                regScope.expensive          = true;
+                regScope.namedVariables     = 5;
+                regScope.indexedVariables   = 0;
+                regScope.variablesReference = 50000 + stack.id;
             }
 
             // 4. Globals for the currently executing script module
@@ -556,6 +784,81 @@ public:
         if (!dbg->cache || !dbg->cache->ctx)
             return dap::Error("no execution context or cache");
 
+        // Registers Scope handling
+        if (request.variablesReference >= 50000 && request.variablesReference < 60000)
+        {
+            int64_t                    frameId     = request.variablesReference - 50000;
+            const asIDBCallStackEntry* targetFrame = nullptr;
+            for (const auto& f : dbg->cache->call_stack)
+            {
+                if (f.id == frameId)
+                {
+                    targetFrame = &f;
+                    break;
+                }
+            }
+            if (!targetFrame)
+                return dap::Error("invalid registers frame reference");
+
+            dap::VariablesResponse response{};
+            auto                   ctx    = dbg->cache->ctx;
+            auto                   func   = targetFrame->func;
+            asUINT                 offset = targetFrame->scope.offset;
+
+            auto add_reg = [&](const std::string& name, const std::string& val, const std::string& type, uintptr_t memRef = 0) {
+                auto& v              = response.variables.emplace_back();
+                v.name               = name;
+                v.value              = val;
+                v.type               = dap::string(type);
+                v.variablesReference = 0;
+                if (memRef != 0)
+                    v.memoryReference = fmt::format("0x{:x}", memRef);
+            };
+
+            void* bc = func ? func->GetByteCode() : nullptr;
+            add_reg("PC", fmt::format("0x{:x}", reinterpret_cast<uintptr_t>(bc)), "void*", reinterpret_cast<uintptr_t>(bc));
+            add_reg("Function", func ? func->GetDeclaration() : "<unknown>", "asIScriptFunction*");
+
+            const char* stateStr = "UNKNOWN";
+            if (ctx)
+            {
+                switch (ctx->GetState())
+                {
+                    case asEXECUTION_FINISHED:
+                        stateStr = "FINISHED";
+                        break;
+                    case asEXECUTION_SUSPENDED:
+                        stateStr = "SUSPENDED";
+                        break;
+                    case asEXECUTION_ABORTED:
+                        stateStr = "ABORTED";
+                        break;
+                    case asEXECUTION_EXCEPTION:
+                        stateStr = "EXCEPTION";
+                        break;
+                    case asEXECUTION_PREPARED:
+                        stateStr = "PREPARED";
+                        break;
+                    case asEXECUTION_UNINITIALIZED:
+                        stateStr = "UNINITIALIZED";
+                        break;
+                    case asEXECUTION_ACTIVE:
+                        stateStr = "ACTIVE";
+                        break;
+                    case asEXECUTION_ERROR:
+                        stateStr = "ERROR";
+                        break;
+                }
+            }
+            add_reg("Context State", stateStr, "asEContextState");
+
+            void* thisPtr = (ctx && offset != SCOPE_SYSTEM) ? ctx->GetThisPointer(offset) : nullptr;
+            add_reg("This Pointer", fmt::format("0x{:x}", reinterpret_cast<uintptr_t>(thisPtr)), "void*", reinterpret_cast<uintptr_t>(thisPtr));
+            add_reg("Stack Level", fmt::format("{}", offset), "uint32");
+
+            return response;
+        }
+
         auto varit = dbg->cache->variable_refs.find(request.variablesReference);
 
         if (varit == dbg->cache->variable_refs.end())
@@ -589,7 +892,9 @@ public:
             var.namedVariables     = local->namedProps.size();
             var.indexedVariables   = local->indexedProps.size();
             var.variablesReference = local->expandRefId.value_or(0);
-            var.memoryReference    = fmt::format("{}", reinterpret_cast<uintptr_t>(local->ptr.lock().get()));
+            var.memoryReference    = (local->address.address != nullptr) ?
+                fmt::format("0x{:x}", reinterpret_cast<uintptr_t>(local->address.address)) :
+                fmt::format("0x{:x}", reinterpret_cast<uintptr_t>(local.get()));
         };
 
         if (!request.filter.has_value() || request.filter.value() == "named")
@@ -660,6 +965,22 @@ public:
                 }
         }
 
+        // Try AST parser and evaluator first for expressions, operators, comparisons, arithmetic
+        as_expr::Parser parser(request.expression);
+        auto astRes = parser.Parse();
+        if (astRes.has_value())
+        {
+            as_expr::Value val = astRes.value()->Evaluate(dbg->cache->ctx, static_cast<asUINT>(stack_index.value_or(0))).DereferenceIfAddress();
+            response.type               = dap::string(val.GetTypeName());
+            response.result             = val.ToString();
+            response.variablesReference = 0;
+            if (val.addr)
+            {
+                response.memoryReference = fmt::format("0x{:x}", reinterpret_cast<uintptr_t>(val.addr));
+            }
+            return response;
+        }
+
         auto result = dbg->cache->ResolveExpression(request.expression, stack_index);
 
         if (!result.has_value())
@@ -674,6 +995,10 @@ public:
         response.type               = dap::string(var->typeName);
         response.result             = var->value.empty() ? var->typeName : var->value;
         response.variablesReference = var->expandRefId.value_or(0);
+        if (var->address.address)
+        {
+            response.memoryReference = fmt::format("0x{:x}", reinterpret_cast<uintptr_t>(var->address.address));
+        }
 
         return response;
     }

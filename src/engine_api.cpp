@@ -39,6 +39,22 @@
 #include "enginedef.h"
 #include "serverdef.h"
 
+extern void NotifyEngineAlert(int atype, const char* msg);
+
+static void Hooked_AlertMessage(ALERT_TYPE atype, const char* szFmt, ...)
+{
+    va_list argptr;
+    char    buffer[1024];
+
+    va_start(argptr, szFmt);
+    vsnprintf(buffer, sizeof(buffer), szFmt, argptr);
+    va_end(argptr);
+
+    NotifyEngineAlert(static_cast<int>(atype), buffer);
+
+    SET_META_RESULT(MRES_IGNORED);
+}
+
 enginefuncs_t meta_engfuncs =
     {
         NULL, // pfnPrecacheModel()
@@ -117,7 +133,7 @@ enginefuncs_t meta_engfuncs =
         NULL, // pfnCVarSetFloat()
         NULL, // pfnCVarSetString()
 
-        NULL, // pfnAlertMessage()
+        Hooked_AlertMessage, // pfnAlertMessage()
         NULL, // pfnEngineFprintf()
 
         NULL, // pfnPvAllocEntPrivateData()

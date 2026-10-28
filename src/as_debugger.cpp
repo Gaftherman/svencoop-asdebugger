@@ -762,215 +762,7 @@ static size_t SafeIterateDict(CScriptDictionary* dict, DictEntryRaw* out_entries
         return 0;
     }
 }
-
-static bool SafeReadCString(const void* ptr, char* out_buf, size_t buf_size, size_t& out_len, bool& out_truncated)
-{
-    __try
-    {
-        if (!ptr)
-            return false;
-        const CString* cstr = reinterpret_cast<const CString*>(ptr);
-        size_t         len  = cstr->m_len;
-        if (len > 10000000)
-            return false;
-
-        if (len == 0)
-        {
-            out_len       = 0;
-            out_truncated = false;
-            if (buf_size > 0)
-                out_buf[0] = '\0';
-            return true;
-        }
-
-        const char* p = cstr->m_ptr;
-        if (!p)
-            return false;
-
-        out_len        = len;
-        size_t to_copy = (len >= buf_size) ? (buf_size - 1) : len;
-        out_truncated  = (len >= buf_size);
-
-        for (size_t i = 0; i < to_copy; i++)
-        {
-            out_buf[i] = p[i];
-        }
-        out_buf[to_copy] = '\0';
-        return true;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        return false;
-    }
-}
-
-static bool SafeReadStdString(const void* ptr, char* out_buf, size_t buf_size, size_t& out_len, bool& out_truncated)
-{
-    __try
-    {
-        if (!ptr)
-            return false;
-        const std_string* strPtr = reinterpret_cast<const std_string*>(ptr);
-        size_t            len    = strPtr->len();
-        if (len > 10000000)
-            return false;
-
-        if (len == 0)
-        {
-            out_len       = 0;
-            out_truncated = false;
-            if (buf_size > 0)
-                out_buf[0] = '\0';
-            return true;
-        }
-
-        const char* c_str = const_cast<std_string*>(strPtr)->c_str();
-        if (!c_str)
-            return false;
-
-        out_len        = len;
-        size_t to_copy = (len >= buf_size) ? (buf_size - 1) : len;
-        out_truncated  = (len >= buf_size);
-
-        for (size_t i = 0; i < to_copy; i++)
-        {
-            out_buf[i] = c_str[i];
-        }
-        out_buf[to_copy] = '\0';
-        return true;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        return false;
-    }
-}
-
-static bool SafeInspectScriptArray(const void* ptr, size_t& out_count, void*& out_data, int& out_elemTypeId, int& out_elemSize)
-{
-    __try
-    {
-        if (!ptr)
-            return false;
-        const CScriptArray* arr = reinterpret_cast<const CScriptArray*>(ptr);
-        CScriptArrayBuffer* buf = arr->m_buffer;
-        out_elemTypeId          = arr->m_ElementTypeId;
-        out_elemSize            = arr->m_unk5; // offset 20 is elementSize in Sven Co-op CScriptArray
-
-        if (!buf)
-        {
-            out_count = 0;
-            out_data  = nullptr;
-            return true;
-        }
-
-        int count = buf->m_size;
-        if (count < 0 || count > 10000000)
-            return false;
-
-        out_count = static_cast<size_t>(count);
-        out_data  = buf->data();
-        return true;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        return false;
-    }
-}
-static void* SafeReadPointer(void* ptr)
-{
-    __try
-    {
-        return ptr ? *reinterpret_cast<void**>(ptr) : nullptr;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        return nullptr;
-    }
-}
 #else
-static void* SafeReadPointer(void* ptr)
-{
-    return ptr ? *reinterpret_cast<void**>(ptr) : nullptr;
-}
-
-static bool SafeReadCString(const void* ptr, char* out_buf, size_t buf_size, size_t& out_len, bool& out_truncated)
-{
-    if (!ptr)
-        return false;
-    const CString* cstr = reinterpret_cast<const CString*>(ptr);
-    size_t         len  = cstr->m_len;
-    if (len > 10000000)
-        return false;
-    if (len == 0)
-    {
-        out_len       = 0;
-        out_truncated = false;
-        if (buf_size > 0)
-            out_buf[0] = '\0';
-        return true;
-    }
-    const char* p = cstr->m_ptr;
-    if (!p)
-        return false;
-    out_len        = len;
-    size_t to_copy = (len >= buf_size) ? (buf_size - 1) : len;
-    out_truncated  = (len >= buf_size);
-    memcpy(out_buf, p, to_copy);
-    out_buf[to_copy] = '\0';
-    return true;
-}
-
-static bool SafeReadStdString(const void* ptr, char* out_buf, size_t buf_size, size_t& out_len, bool& out_truncated)
-{
-    if (!ptr)
-        return false;
-    const std_string* strPtr = reinterpret_cast<const std_string*>(ptr);
-    size_t            len    = strPtr->len();
-    if (len > 10000000)
-        return false;
-    if (len == 0)
-    {
-        out_len       = 0;
-        out_truncated = false;
-        if (buf_size > 0)
-            out_buf[0] = '\0';
-        return true;
-    }
-    const char* c_str = const_cast<std_string*>(strPtr)->c_str();
-    if (!c_str)
-        return false;
-    out_len        = len;
-    size_t to_copy = (len >= buf_size) ? (buf_size - 1) : len;
-    out_truncated  = (len >= buf_size);
-    memcpy(out_buf, c_str, to_copy);
-    out_buf[to_copy] = '\0';
-    return true;
-}
-
-static bool SafeInspectScriptArray(const void* ptr, size_t& out_count, void*& out_data, int& out_elemTypeId, int& out_elemSize)
-{
-    if (!ptr)
-        return false;
-    const CScriptArray* arr = reinterpret_cast<const CScriptArray*>(ptr);
-    CScriptArrayBuffer* buf = arr->m_buffer;
-    out_elemTypeId          = arr->m_ElementTypeId;
-    out_elemSize            = arr->m_unk5; // offset 20 is elementSize in Sven Co-op CScriptArray
-
-    if (!buf)
-    {
-        out_count = 0;
-        out_data  = nullptr;
-        return true;
-    }
-
-    int count = buf->m_size;
-    if (count < 0 || count > 10000000)
-        return false;
-
-    out_count = static_cast<size_t>(count);
-    out_data  = buf->data();
-    return true;
-}
 
 static bool SafeGetDictSize(CScriptDictionary* dict, unsigned int& out_count)
 {
@@ -1910,6 +1702,22 @@ void asIDBFileWorkspace::CompileBreakpointPositions()
     int         col;
     int         row = ctx->GetLineNumber(0, &col, &section);
 
+    // 0. Zero-stall rejection bitmap: If not stepping and no function breakpoints, check line bitmap
+    if (debugger->action == asIDBAction::None && debugger->function_breakpoints.empty())
+    {
+        if (row > 0)
+        {
+            uint32_t slot = static_cast<uint32_t>(row) % 4096;
+            uint32_t word = slot / 64;
+            uint64_t bit  = 1ULL << (slot % 64);
+            if ((debugger->line_bitmap[word].load(std::memory_order_relaxed) & bit) == 0)
+            {
+                // No breakpoint exists on this line across ANY section. Zero stalls!
+                return;
+            }
+        }
+    }
+
     // we might not have an action - functions called from within
     // the debugger will never have this set.
     if (debugger->action != asIDBAction::None)
@@ -2023,40 +1831,53 @@ void asIDBFileWorkspace::CompileBreakpointPositions()
                     {
                         if (!lines.column.has_value() || lines.column.value() <= 0 || lines.column.value() == col)
                         {
-                            lines.hitCount++;
-
-                            // Logpoint: send message to DAP console and do not pause game!
-                            if (!lines.logMessage.empty())
+                            // Module 2 Strict Order:
+                            // 1. Evaluate condition AST (if false or error, continue immediately; rate-limit error output)
+                            if (lines.conditionAst)
                             {
-                                debugger->SendLogOutput(fmt::format("[Logpoint] {}\n", lines.logMessage));
+                                as_expr::Value condVal = lines.conditionAst->Evaluate(ctx, 0).DereferenceIfAddress();
+                                if (!condVal.ToBool())
+                                    continue;
+                            }
+                            else if (!lines.condition.empty())
+                            {
+                                if (!lines.warnedError)
+                                {
+                                    lines.warnedError = true;
+                                    debugger->SendLogOutput(fmt::format("[Breakpoint Error] Line {}: condition parse error: {}\n",
+                                                                        lines.line, lines.conditionError));
+                                }
                                 continue;
                             }
 
-                            // Hit count condition: if numeric, break only when hit count >= target
-                            if (!lines.hitCondition.empty())
+                            // 2. Increment hitCount and evaluate hit condition
+                            lines.hitCount++;
+                            if (lines.hitRule.op != as_expr::HitOp::AlwaysTrue)
+                            {
+                                if (!lines.hitRule.Evaluate(lines.hitCount))
+                                    continue;
+                            }
+                            else if (!lines.hitCondition.empty())
                             {
                                 int target = atoi(lines.hitCondition.c_str());
                                 if (target > 0 && lines.hitCount < target)
                                     continue;
                             }
 
-                            // Conditional expression: evaluate condition in frame 0
-                            if (!lines.condition.empty())
+                            // 3. Evaluate logMessage / logpoint (interpolate {expr} ASTs, emit DAP output, do not pause)
+                            if (!lines.logTemplate.empty())
                             {
-                                asIDBCache evalCache(*debugger, ctx);
-                                auto       exprRes = evalCache.ResolveExpression(lines.condition, 0);
-                                if (exprRes.has_value())
-                                {
-                                    auto var = exprRes.value().lock();
-                                    if (var)
-                                    {
-                                        var->Evaluate();
-                                        if (var->value == "false" || var->value == "0" || var->value == "(null)")
-                                            continue;
-                                    }
-                                }
+                                std::string msg = lines.logTemplate.Evaluate(ctx, 0);
+                                debugger->SendLogOutput(fmt::format("[Logpoint] {}\n", msg));
+                                continue;
+                            }
+                            else if (!lines.logMessage.empty())
+                            {
+                                debugger->SendLogOutput(fmt::format("[Logpoint] {}\n", lines.logMessage));
+                                continue;
                             }
 
+                            // 4. Pause and emit stopped event
                             break_from_bp = true;
                             break;
                         }
@@ -2103,7 +1924,34 @@ void asIDBFileWorkspace::CompileBreakpointPositions()
     if (!debugger->break_on_exceptions)
         return;
 
+    debugger->last_exception_description = (ctx && ctx->GetExceptionString()) ? ctx->GetExceptionString() : "Script exception";
+    debugger->is_exception_break         = true;
     debugger->DebugBreak(ctx);
+}
+
+void asIDBDebugger::HandleNativeBindingError(asIScriptContext* ctx, const char* msg)
+{
+    if (internal_execution || !ctx)
+        return;
+
+    last_exception_description = msg ? msg : "Native AngelScript binding error";
+    is_exception_break         = true;
+
+    std::string stackStr;
+    for (asUINT i = 0; i < ctx->GetCallstackSize(); ++i)
+    {
+        auto        func = ctx->GetFunction(i);
+        int         col  = 0;
+        const char* sec  = nullptr;
+        int         line = ctx->GetLineNumber(i, &col, &sec);
+        stackStr += fmt::format("  at {} ({}:{})", func ? func->GetDeclaration() : "<unknown>",
+                                sec ? sec : "<unknown>", line);
+        if (i + 1 < ctx->GetCallstackSize())
+            stackStr += "\n";
+    }
+    last_exception_callstack = stackStr;
+
+    DebugBreak(ctx);
 }
 
 void asIDBDebugger::HookContextOnce(asIScriptContext* ctx)
@@ -2173,6 +2021,27 @@ void asIDBDebugger::DebugBreak(asIScriptContext* ctx)
     Suspend();
 }
 
+void asIDBDebugger::RebuildLineBitmapLocked()
+{
+    for (auto& w : line_bitmap)
+    {
+        w.store(0, std::memory_order_relaxed);
+    }
+    for (const auto& [sec, bps] : breakpoints)
+    {
+        for (const auto& bp : bps)
+        {
+            if (bp.line > 0)
+            {
+                uint32_t slot = static_cast<uint32_t>(bp.line) % 4096;
+                uint32_t word = slot / 64;
+                uint64_t bit  = 1ULL << (slot % 64);
+                line_bitmap[word].fetch_or(bit, std::memory_order_relaxed);
+            }
+        }
+    }
+}
+
 void asIDBDebugger::ClearBreakpointCaches()
 {
     bp_section_cache.clear();
@@ -2181,6 +2050,7 @@ void asIDBDebugger::ClearBreakpointCaches()
     {
         bp_section_cache.insert(std::string(sec));
     }
+    RebuildLineBitmapLocked();
 }
 
 void asIDBDebugger::UpdateHasWorkAtomic()

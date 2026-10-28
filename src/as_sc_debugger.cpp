@@ -35,27 +35,25 @@ void asSCDebugger::Suspend()
     if (dap_server)
     {
         dap::StoppedEvent event;
-        bool              isException = (cache && cache->ctx && cache->ctx->GetState() == asEXECUTION_EXCEPTION);
+        bool              isException = is_exception_break || (cache && cache->ctx && cache->ctx->GetState() == asEXECUTION_EXCEPTION);
 
         if (isException)
         {
             event.reason      = "exception";
-            const char* exStr = cache->ctx->GetExceptionString();
-            if (exStr)
-            {
-                event.description = exStr;
-                event.text        = exStr;
+            std::string exStr = !last_exception_description.empty() ? last_exception_description :
+                ((cache && cache->ctx && cache->ctx->GetExceptionString()) ? cache->ctx->GetExceptionString() : "Exception occurred");
 
-                int         col     = 0;
-                const char* section = nullptr;
-                int         row     = cache->ctx->GetLineNumber(0, &col, &section);
+            event.description = exStr;
+            event.text        = exStr;
 
-                dap::OutputEvent outEvent;
-                outEvent.category = "stderr";
-                outEvent.output   = std::string("[AngelScript Exception] ") + exStr +
-                    " in '" + (section ? section : "unknown") + "':" + std::to_string(row) + "\n";
-                dap_server->SendEventToClient(outEvent);
-            }
+            int         col     = 0;
+            const char* section = nullptr;
+            int         row     = (cache && cache->ctx) ? cache->ctx->GetLineNumber(0, &col, &section) : 0;
+
+            dap::OutputEvent outEvent;
+            outEvent.category = "stderr";
+            outEvent.output   = fmt::format("[AngelScript Exception] {} in '{}':{}\n", exStr, section ? section : "unknown", row);
+            dap_server->SendEventToClient(outEvent);
         }
         else
         {
@@ -101,6 +99,9 @@ void asSCDebugger::Resume()
     {
         std::scoped_lock lock(m_suspendMutex);
         m_suspended = false;
+        is_exception_break = false;
+        last_exception_description.clear();
+        last_exception_callstack.clear();
     }
     m_cv.notify_all();
 }

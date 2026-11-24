@@ -935,6 +935,9 @@ public:
                     case asEXECUTION_ERROR:
                         stateStr = "ERROR";
                         break;
+                    case asEXECUTION_DESERIALIZATION:
+                        stateStr = "DESERIALIZATION";
+                        break;
                 }
             }
             add_reg("Context State", stateStr, "asEContextState");

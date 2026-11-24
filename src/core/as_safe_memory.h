@@ -64,7 +64,12 @@ inline bool SafeProbeMemoryReadable(const void* ptr, size_t size)
     uintptr_t page = start & ~(pageSize - 1);
     while (page < end)
     {
+#if defined(__APPLE__)
+        // macOS declares the residency vector as char*; other POSIX systems use unsigned char*.
+        char vec = 0;
+#else
         unsigned char vec = 0;
+#endif
         if (mincore(reinterpret_cast<void*>(page), pageSize, &vec) != 0)
             return false;
         page += pageSize;

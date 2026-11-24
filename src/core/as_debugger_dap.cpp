@@ -513,6 +513,22 @@ public:
 
             std::scoped_lock lock(dbg->mutex);
 
+            if (dbg->workspace->IsDeclarationOnlySource(pathstr))
+            {
+                if (request.breakpoints)
+                {
+                    for (const auto& bp : *request.breakpoints)
+                    {
+                        auto& placed = response.breakpoints.emplace_back();
+                        placed.verified = false;
+                        placed.line = bp.line;
+                        placed.column = bp.column;
+                        placed.message = "Predefined stubs contain declarations only.";
+                    }
+                }
+                return response;
+            }
+
             auto secIt = dbg->workspace->sections.find(pathstr);
             if (secIt == dbg->workspace->sections.end())
             {

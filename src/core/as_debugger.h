@@ -562,6 +562,9 @@ public:
     // check if a section is virtual.
     virtual bool SectionIsVirtual(const std::string_view v) const = 0;
 
+    // Declaration-only files do not map to executable script sections.
+    virtual bool IsDeclarationOnlySource(std::string_view) const { return false; }
+
     // return the full section source of the given section.
     virtual std::string SectionSource(const std::string_view v) const = 0;
 
@@ -597,6 +600,10 @@ public:
     virtual bool SectionIsVirtual(const std::string_view v) const override
     {
         return false;
+    }
+    bool IsDeclarationOnlySource(std::string_view section) const override
+    {
+        return section.ends_with(".as.predefined");
     }
 
     virtual std::string SectionSource(const std::string_view v) const override;

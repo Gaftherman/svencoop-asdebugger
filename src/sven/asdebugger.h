@@ -10,6 +10,7 @@ void ASDebugger_Shutdown();
 void RegisterAngelScriptMethods();
 void RegisterAngelScriptHooks();
 
+void ASDebug_Log(const char* fmt, ...);
 void ASDebug_Notice(const char* fmt, ...);
 void ASDebug_SetVerbose(bool enable);
 bool ASDebug_IsVerbose();

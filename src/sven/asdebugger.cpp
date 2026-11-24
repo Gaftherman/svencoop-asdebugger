@@ -259,7 +259,8 @@ void ASDebugger_Init(const char* gameDir)
 
     g_Workspace            = std::make_unique<asSCWorkspace>(basePath, std::initializer_list<asIScriptEngine*>{engine});
     g_Debugger             = std::make_unique<asSCDebugger>(g_Workspace.get());
-    g_DAPServer            = std::make_unique<asIDBDAPServer>(g_DebuggerPort, g_Debugger.get());
+    g_DAPServer            = std::make_unique<asIDBDAPServer>(g_DebuggerPort, g_Debugger.get(), "0.0.0.0", true,
+                                                              [](const std::string& msg) { ASDebug_Notice("%s", msg.c_str()); });
     g_Debugger->dap_server = g_DAPServer.get();
 
     // Hook context execution

@@ -25,12 +25,15 @@
 #    include <unistd.h>
 #endif
 
+BEGIN_AS_NAMESPACE
+
 class asIDBDAPClient
 {
 public:
     asIDBDebugger*                dbg;
     std::atomic_bool              configuration_complete = false;
     std::atomic_bool              terminate              = false;
+    std::atomic_bool              transport_closed       = false;
     std::unique_ptr<dap::Session> session;
 
     ~asIDBDAPClient()
@@ -41,7 +44,7 @@ public:
         }
     }
 
-    asIDBDAPClient(asIDBDebugger* dbg, const std::shared_ptr<dap::ReaderWriter>& socket) :
+    asIDBDAPClient(asIDBDebugger* dbg, const std::shared_ptr<dap::ReaderWriter>& socket, bool acceptLaunch) :
         dbg(dbg),
         session(dap::Session::create())
     {
@@ -100,6 +103,9 @@ public:
         session->registerHandler([&](const dap::NextRequest& request) { return this->HandleRequest(request); });
         session->registerHandler([&](const dap::EvaluateRequest& request) { return this->HandleRequest(request); });
         session->registerHandler([&](const dap::AttachRequest& request) { return this->HandleRequest(request); });
+        // The VS Code adapter has already spawned the host before sending launch.
+        if (acceptLaunch)
+            session->registerHandler([](const dap::LaunchRequest&) { return dap::LaunchResponse{}; });
         session->registerHandler(
             [&](const dap::BreakpointLocationsRequest& request) { return this->HandleRequest(request); });
         session->registerHandler(
@@ -119,8 +125,10 @@ public:
             [&](const dap::ResponseOrError<dap::InitializeResponse>& response) { OnResponseSent(response); });
         session->registerSentHandler(
             [&](const dap::ResponseOrError<dap::ConfigurationDoneResponse>& response) { OnResponseSent(response); });
+        session->registerSentHandler(
+            [&](const dap::ResponseOrError<dap::DisconnectResponse>&) { terminate = true; });
 
-        session->bind(socket);
+        session->bind(socket, [this] { transport_closed = true; });
     }
 
     dap::ReadMemoryResponse HandleRequest(const dap::ReadMemoryRequest& request)
@@ -469,7 +477,6 @@ public:
 
     dap::DisconnectResponse HandleRequest(const dap::DisconnectRequest& request)
     {
-        terminate = true;
         if (dbg)
         {
             dbg->SetAction(asIDBAction::Continue);
@@ -496,7 +503,7 @@ public:
                 {
                     std::string secNorm(sec.section);
                     std::replace(secNorm.begin(), secNorm.end(), '\\', '/');
-                    if (PathMatchesSection(secNorm, needle))
+                    if (dbg->workspace->MatchesSection(secNorm, needle))
                     {
                         pathstr = secNorm;
                         break;
@@ -1022,7 +1029,7 @@ public:
             for (size_t i = 0; i < dbg->cache->call_stack.size(); i++)
                 if (request.frameId.value() == dbg->cache->call_stack[i].id)
                 {
-                    stack_index = i;
+                    stack_index = static_cast<int>(i);
                     break;
                 }
         }
@@ -1032,7 +1039,7 @@ public:
         auto astRes = parser.Parse();
         if (astRes.has_value())
         {
-            as_expr::Value val = astRes.value()->Evaluate(dbg->cache->ctx, static_cast<asUINT>(stack_index.value_or(0))).DereferenceIfAddress();
+            as_expr::Value val          = astRes.value()->Evaluate(dbg->cache->ctx, static_cast<asUINT>(stack_index.value_or(0)), dbg->hostAdapter).DereferenceIfAddress();
             response.type               = dap::string(val.GetTypeName());
             response.result             = val.ToString();
             response.variablesReference = 0;
@@ -1080,9 +1087,14 @@ public:
     }
 };
 
-asIDBDAPServer::asIDBDAPServer(int port, asIDBDebugger* debugger) :
+asIDBDAPServer::asIDBDAPServer(int port, asIDBDebugger* debugger, std::string host, bool fallbackPorts, Notice notice,
+                               bool acceptLaunch) :
     port(port),
-    dbg(debugger)
+    dbg(debugger),
+    host(std::move(host)),
+    fallbackPorts(fallbackPorts),
+    notice(std::move(notice)),
+    acceptLaunch(acceptLaunch)
 {
 }
 
@@ -1136,60 +1148,72 @@ static bool CheckPortAvailable(int port)
 void asIDBDAPServer::ClientConnected(const std::shared_ptr<dap::ReaderWriter>& socket)
 {
     std::lock_guard<std::mutex> lock(clientMutex);
-    client = std::make_shared<asIDBDAPClient>(dbg, socket);
+    client = std::make_shared<asIDBDAPClient>(dbg, socket, acceptLaunch);
 }
 
 void asIDBDAPServer::ClientError(const char* msg)
 {
 }
 
-void asIDBDAPServer::StartServer()
+bool asIDBDAPServer::StartServer()
 {
-    int  candidatePort = port;
-    bool found         = false;
+    if (server)
+        return true;
 
-    // Probe requested port, then fallback to candidatePort + 1 up to +10
-    for (int offset = 0; offset <= 10; ++offset)
+    int candidatePort = port;
+    if (fallbackPorts)
     {
-        int p = port + offset;
-        if (CheckPortAvailable(p))
+        // Probe the requested port, then up to ten fallback ports.
+        bool found = false;
+        for (int offset = 0; offset <= 10; ++offset)
         {
-            candidatePort = p;
-            found         = true;
-            break;
+            const int p = port + offset;
+            if (CheckPortAvailable(p))
+            {
+                candidatePort = p;
+                found         = true;
+                break;
+            }
+        }
+
+        if (!found)
+        {
+            if (notice)
+                notice(fmt::format("WARNING: DAP server could not bind to port {} or fallback ports {}-{} (addresses already in use). DAP server disabled to avoid game hang.",
+                                   port, port + 1, port + 10));
+            return false;
+        }
+
+        if (notice && candidatePort != port)
+        {
+            notice(fmt::format("NOTICE: Default DAP port {} is already in use. Automatically switched to fallback port {}.",
+                               port, candidatePort));
+            notice(fmt::format("NOTICE: To attach from VS Code, set \"port\": {} in your launch.json, or close the application occupying port {}.",
+                               candidatePort, port));
         }
     }
 
-    if (!found)
-    {
-        ASDebug_Notice("WARNING: DAP server could not bind to port %d or fallback ports %d-%d (addresses already in use). DAP server disabled to avoid game hang.",
-                       port, port + 1, port + 10);
-        actual_port = 0;
-        server.reset();
-        return;
-    }
-
     actual_port = candidatePort;
-    if (actual_port != port)
-    {
-        ASDebug_Notice("NOTICE: Default DAP port %d is already in use. Automatically switched to fallback port %d.",
-                       port, actual_port);
-        ASDebug_Notice("NOTICE: To attach from VS Code, set \"port\": %d in your launch.json, or close the application occupying port %d.",
-                       actual_port, port);
-    }
-
-    server       = dap::net::Server::create();
-    bool started = server->start(
-        "0.0.0.0", actual_port,
+    server             = dap::net::Server::create();
+    const bool started = server->start(
+        host.c_str(), actual_port,
         [&](const std::shared_ptr<dap::ReaderWriter>& socket) { this->ClientConnected(socket); },
         [&](const char* msg) { this->ClientError(msg); });
 
     if (!started)
     {
-        ASDebug_Notice("ERROR: dap::net::Server::start failed on port %d! DAP server disabled.", actual_port);
+        if (notice)
+            notice(fmt::format("ERROR: dap::net::Server::start failed on port {}! DAP server disabled.", actual_port));
         actual_port = 0;
         server.reset();
     }
+    return started;
+}
+
+bool asIDBDAPServer::ClientConfigured() const
+{
+    std::lock_guard<std::mutex> lock(clientMutex);
+    return client && !client->terminate && !client->transport_closed && client->configuration_complete;
 }
 
 void asIDBDAPServer::StopServer()
@@ -1243,3 +1267,5 @@ void asIDBDAPServer::SendEventToClient(const dap::TypeInfo* typeinfo, const void
     if (c)
         c->session->send(typeinfo, event);
 }
+
+END_AS_NAMESPACE

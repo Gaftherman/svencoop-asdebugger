@@ -3,9 +3,22 @@
 
 #pragma once
 
+#include <algorithm>
+#include <angelscript.h>
+#include <array>
+#include <cassert>
 #include <cctype>
+#include <cstdint>
+#include <cstring>
+#include <format>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <variant>
+#include <vector>
+
+BEGIN_AS_NAMESPACE
 
 inline bool PathEqualsCaseInsensitive(std::string_view a, std::string_view b)
 {
@@ -34,34 +47,6 @@ inline bool PathEndsWithCaseInsensitive(std::string_view full, std::string_view 
             return false;
     }
     return true;
-}
-
-inline std::string_view ExtractScriptsSubpath(std::string_view p)
-{
-    if (p.empty())
-        return p;
-
-    if (p.length() >= 8)
-    {
-        std::string_view prefix = p.substr(0, 8);
-        if (PathEqualsCaseInsensitive(prefix, "scripts/") || PathEqualsCaseInsensitive(prefix, "scripts\\"))
-            return p;
-    }
-
-    for (size_t i = 0; i + 8 < p.length(); ++i)
-    {
-        char c0 = p[i];
-        if (c0 == '/' || c0 == '\\')
-        {
-            std::string_view sub = p.substr(i + 1, 8);
-            if (PathEqualsCaseInsensitive(sub, "scripts/") || PathEqualsCaseInsensitive(sub, "scripts\\"))
-            {
-                return p.substr(i + 1);
-            }
-        }
-    }
-
-    return {};
 }
 
 inline bool PathMatchesSection(std::string_view pathA, std::string_view pathB)
@@ -93,52 +78,15 @@ inline bool PathMatchesSection(std::string_view pathA, std::string_view pathB)
         }
     }
 
-    // Cross-environment / relative matching: if both contain "scripts/", match starting from "scripts/"
-    std::string_view subA = ExtractScriptsSubpath(pathA);
-    std::string_view subB = ExtractScriptsSubpath(pathB);
-    if (!subA.empty() && !subB.empty())
-    {
-        if (PathEqualsCaseInsensitive(subA, subB))
-            return true;
-
-        if (subA.length() > subB.length())
-        {
-            size_t offset = subA.length() - subB.length();
-            if (PathEndsWithCaseInsensitive(subA, subB))
-            {
-                char prevChar = subA[offset - 1];
-                if (prevChar == '/' || prevChar == '\\')
-                    return true;
-            }
-        }
-        else if (subB.length() > subA.length())
-        {
-            size_t offset = subB.length() - subA.length();
-            if (PathEndsWithCaseInsensitive(subB, subA))
-            {
-                char prevChar = subB[offset - 1];
-                if (prevChar == '/' || prevChar == '\\')
-                    return true;
-            }
-        }
-    }
-
     return false;
 }
 
-#include <angelscript.h>
-#include <string_view>
-#include <variant>
-#include <vector>
-
-#if __has_include(<format>)
-#    include <format>
 namespace fmt = std;
+
+#if ANGELSCRIPT_VERSION >= 23900
+using asIDBEnumValue = asINT64;
 #else
-#    ifndef FMT_HEADER_ONLY
-#        define FMT_HEADER_ONLY 1
-#    endif
-#    include <fmt/format.h>
+using asIDBEnumValue = int;
 #endif
 
 // simple std::expected-like
@@ -559,15 +507,6 @@ SOFTWARE.
 https://github.com/tobiaslocker/base64
 */
 
-#include <algorithm>
-#include <array>
-#include <cassert>
-#include <cstdint>
-#include <cstring>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <type_traits>
 
 namespace base64
 {
@@ -734,3 +673,5 @@ inline std::string to_base64(std::string_view data)
     return encode_into<std::string>(std::begin(data), std::end(data));
 }
 } // namespace base64
+
+END_AS_NAMESPACE

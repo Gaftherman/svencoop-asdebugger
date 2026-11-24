@@ -15,14 +15,11 @@
 #include <unordered_set>
 
 #include "as_helpers.h"
+#include "as_debugger_host.h"
 #include "as_safe_memory.h"
 #include "as_expr_ast.h"
-#include <asext_api.h>
-#include <std_string.h>
 
-void ASDebug_Log(const char* fmt, ...);
-void ASDebug_Notice(const char* fmt, ...);
-bool ASDebug_IsVerbose();
+BEGIN_AS_NAMESPACE
 
 struct asIDBTypeId
 {
@@ -41,8 +38,7 @@ inline void asIDBHashCombine(size_t& seed, const T& v)
     seed ^= std::hash<T>()(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
 }
 
-template <>
-struct std::hash<asIDBTypeId>
+struct asIDBTypeIdHash
 {
     inline std::size_t operator()(const asIDBTypeId& key) const
     {
@@ -52,7 +48,7 @@ struct std::hash<asIDBTypeId>
     }
 };
 
-using asIDBTypeNameMap = std::unordered_map<asIDBTypeId, std::string>;
+using asIDBTypeNameMap = std::unordered_map<asIDBTypeId, std::string, asIDBTypeIdHash>;
 
 // a reference to a type ID + fixed address somewhere
 // in memory that will always be alive as long as
@@ -558,6 +554,11 @@ public:
     virtual std::string PathToSection(const std::string_view v) const = 0;
     virtual std::string SectionToPath(const std::string_view v) const = 0;
 
+    virtual bool MatchesSection(std::string_view path, std::string_view section) const
+    {
+        return PathMatchesSection(path, section);
+    }
+
     // check if a section is virtual.
     virtual bool SectionIsVirtual(const std::string_view v) const = 0;
 
@@ -601,8 +602,8 @@ public:
     virtual std::string SectionSource(const std::string_view v) const override;
 
 private:
-    void CompileScriptSources();
-    void CompileBreakpointPositions();
+    void CompileScriptSources() override;
+    void CompileBreakpointPositions() override;
 };
 
 using asIDBBreakpointMap = std::unordered_map<std::string_view, asIDBSectionBreakpoints>;
@@ -638,6 +639,7 @@ public:
     std::atomic_bool internal_execution = false;
 
     asIDBWorkspace*                 workspace;
+    const asIDBHostAdapter&         hostAdapter;
     asIDBBreakpointMap              breakpoints;
     asIDBSectionFunctionBreakpoints function_breakpoints;
 
@@ -662,8 +664,9 @@ public:
     // current frame offset for use by the cache
     std::atomic_int64_t frame_offset = 0;
 
-    asIDBDebugger(asIDBWorkspace* workspace) :
-        workspace(workspace)
+    asIDBDebugger(asIDBWorkspace* workspace, const asIDBHostAdapter& adapter) :
+        workspace(workspace),
+        hostAdapter(adapter)
     {
     }
 
@@ -683,7 +686,7 @@ public:
     // HasWork() returns true and you're requesting
     // a new context / executing code from a context
     // that isn't already hooked.
-    void HookContext(asIScriptContext* ctx, bool has_work);
+    bool HookContext(asIScriptContext* ctx, bool has_work);
 
     // break on the current context. Creates the cache
     // and then suspends. Note that the cache will
@@ -715,6 +718,8 @@ public:
     virtual std::string FetchSource(const char* section) = 0;
 
 protected:
+    virtual void OnDebugBreak(asIScriptContext*) {}
+
     // called when the debugger is being asked to pause.
     // don't call directly, use DebugBreak.
     virtual void Suspend() = 0;
@@ -735,3 +740,5 @@ template <typename T>
 {
     var->value = fmt::format("{}", *var->address.ResolveAs<const T>());
 }
+
+END_AS_NAMESPACE

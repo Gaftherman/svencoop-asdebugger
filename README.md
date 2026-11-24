@@ -1,8 +1,10 @@
 # asdebugger
 
-A native AngelScript DAP (Debug Adapter Protocol) debugger plugin for Sven Co-op using
-[metamod-fallguys](https://github.com/hzqst/metamod-fallguys) and
-[cppdap](https://github.com/google/cppdap).
+A native AngelScript debugger with a TCP Debug Adapter Protocol (DAP) server powered by
+[cppdap](https://github.com/google/cppdap). The static library `asdebugger_core` lives in
+`src/core/` and can be embedded in a C++ host using AngelScript 2.39.0. The Sven Co-op
+plugin lives in `src/sven/` and uses [metamod-fallguys](https://github.com/hzqst/metamod-fallguys)
+and ASExt to connect to the game's VM.
 
 Developed by **Gaftherman** ([asdebugger](https://github.com/Gaftherman/asdebugger)).
 
@@ -28,12 +30,16 @@ installing the resulting package requires no separate Metamod DLL download.
 - **Non-blocking Server**: Safe thread suspension and resume using condition variables; dedicated server remains responsive.
 - **Native Macro & Helpers**: Injects preprocessor definition `METAMOD_PLUGIN_ASDEBUGGER` and native script function `DebugBreak()`.
 
-## Build
+## Build the Sven Co-op plugin
+
+`ASDEBUGGER_BUILD_SVEN_PLUGIN` defaults to ON when configuring this repository
+directly. That build uses the Sven SDK's AngelScript ABI.
 
 Requirements: Git, CMake 3.21+, Python 3.8+ (3.12 for repository tests), internet
 access for the first dependency/gamedata download, and a 32-bit toolchain.
 Windows requires Visual Studio 2022 with Desktop development with C++.
-Linux requires GCC/G++ multilib, for example on Ubuntu:
+Linux requires GCC/G++ multilib with C++20 `std::format` support. For example,
+on Ubuntu:
 
 ```sh
 sudo apt-get update
@@ -73,6 +79,97 @@ For Debug, replace every `Release` with `Debug`. Use a separate build tree for e
 configuration. Installation defaults to `install/x86/<Config>`; an explicit
 `CMAKE_INSTALL_PREFIX` overrides it. The packaging script creates clean archives
 in `build/packages/`.
+
+## Using the core in your own host
+
+Add AngelScript 2.39.0 and asdebugger to your CMake project. The core requires a
+C++20 compiler and standard library with `std::format`, CMake 3.21+, Git, and
+Python 3 for the cppdap patch. The Sven plugin defaults to OFF in a subdirectory
+build. The core configuration works without the Metamod and ASExt submodules.
+
+```cmake
+# ANGELSCRIPT_SDK points to the sdk/ directory from the AngelScript v2.39.0 tag.
+add_subdirectory("${ANGELSCRIPT_SDK}/angelscript/projects/cmake" angelscript)
+set(ASDEBUGGER_STD_ADAPTER ON)
+set(ASDEBUGGER_STD_ADDON_DIR "${ANGELSCRIPT_SDK}/add_on")
+add_subdirectory(external/asdebugger)
+
+add_executable(my_host main.cpp)
+foreach(addon IN ITEMS scriptstdstring scriptarray scriptdictionary)
+    target_sources(my_host PRIVATE "${ASDEBUGGER_STD_ADDON_DIR}/${addon}/${addon}.cpp")
+    target_include_directories(my_host PRIVATE "${ASDEBUGGER_STD_ADDON_DIR}/${addon}")
+endforeach()
+target_link_libraries(my_host PRIVATE asdebugger_core)
+```
+
+Configure the parent project with `cmake -S . -B build` and build the host with
+`cmake --build build --config Release`. To build just the library, add
+`--target asdebugger_core`. The default AngelScript target name is `angelscript`.
+Set `ASDEBUGGER_ANGELSCRIPT_TARGET` before `add_subdirectory(external/asdebugger)`
+if your target has another name.
+
+The standard adapter uses the vanilla string, array, and dictionary add-ons. The
+host compiles the add-on sources as shown above. For custom bindings, implement
+`asIDBHostAdapter` in `src/core/as_debugger_host.h` and leave
+`ASDEBUGGER_STD_ADAPTER` OFF.
+
+Run this example in a directory containing a `main.as` file with a
+`void tick()` function. Pass `--wait` to wait for a DAP client to finish
+configuration before the script starts. The sample runs 60 ticks.
+
+```cpp
+#include <as_debugger_host.h>
+#include <adapters/std_host_adapter.h>
+#include <scriptarray.h>
+#include <scriptdictionary.h>
+#include <scriptstdstring.h>
+#include <chrono>
+#include <fstream>
+#include <iterator>
+#include <thread>
+
+int main(int argc, char** argv)
+{
+    auto release = [](asIScriptEngine* engine) { engine->ShutDownAndRelease(); };
+    std::unique_ptr<asIScriptEngine, decltype(release)> engine(asCreateScriptEngine(), release);
+    if (!engine) return 1;
+    RegisterStdString(engine.get());
+    RegisterScriptArray(engine.get(), true);
+    RegisterScriptDictionary(engine.get());
+
+    std::ifstream input("main.as", std::ios::binary);
+    if (!input) return 1;
+    std::string source{std::istreambuf_iterator<char>(input), {}};
+    auto* module = engine->GetModule("main", asGM_ALWAYS_CREATE);
+    if (module->AddScriptSection("main.as", source.data(), source.size()) < 0 || module->Build() < 0) return 1;
+    auto* tick = module->GetFunctionByDecl("void tick()");
+    if (!tick) return 1;
+
+    StdHostAdapter adapter;
+    asIDBHostDebugger debugger(engine.get(), adapter);
+    if (!debugger.Start("127.0.0.1", 9002)) return 1;
+    if (argc > 1 && std::string_view(argv[1]) == "--wait") debugger.WaitForClient();
+
+    auto releaseContext = [](asIScriptContext* ctx) { ctx->Release(); };
+    std::unique_ptr<asIScriptContext, decltype(releaseContext)> ctx(engine->CreateContext(), releaseContext);
+    if (!debugger.AttachContext(ctx.get())) return 1;
+    int result = asEXECUTION_FINISHED;
+    for (int frame = 0; frame < 60; ++frame)
+    {
+        if ((result = ctx->Prepare(tick)) < 0 || (result = ctx->Execute()) != asEXECUTION_FINISHED) break;
+        debugger.Poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+    }
+    debugger.DetachContext(ctx.get());
+    return result == asEXECUTION_FINISHED ? 0 : 1;
+}
+```
+
+`AttachContext()` installs the line and exception callbacks. `DetachContext()`
+clears them before you release the context or destroy the debugger. Keep the
+engine, adapter, and compiled modules alive while the debugger is in use.
+When the engine target exports `AS_USE_NAMESPACE`, the debugger and adapter
+types are in the `AngelScript` namespace alongside the engine and add-ons.
 
 ## Install and run
 

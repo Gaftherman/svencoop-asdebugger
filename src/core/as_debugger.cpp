@@ -5,6 +5,11 @@
 #include <array>
 #include <bitset>
 #include <charconv>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+
+BEGIN_AS_NAMESPACE
 
 void asIDBVariable::Evaluate()
 {
@@ -729,91 +734,6 @@ void* asIDBCache::ResolvePropertyAddress(const asIDBVarAddr& id, int propertyInd
         globals->SetRefId();
 }
 
-struct DictEntryRaw
-{
-    const CString* keyObj;
-    void*          node;
-};
-
-#ifdef _WIN32
-#    include <windows.h>
-
-static bool SafeGetDictSize(CScriptDictionary* dict, unsigned int& out_count)
-{
-    __try
-    {
-        if (!dict || !ASEXT_CScriptDictionary_GetSize)
-            return false;
-        out_count = ASEXT_CScriptDictionary_GetSize(dict);
-        return true;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        return false;
-    }
-}
-
-static size_t SafeIterateDict(CScriptDictionary* dict, DictEntryRaw* out_entries, size_t max_entries)
-{
-    __try
-    {
-        if (!dict || !ASEXT_CScriptDictionary_begin || !ASEXT_CScriptDictionary_end ||
-            !ASEXT_CScriptDictionary_CIterator_operator_NE || !ASEXT_CScriptDictionary_CIterator_operator_PP ||
-            !ASEXT_CScriptDictionary_CIterator_GetKey)
-            return 0;
-
-        CScriptDictionary_CIterator it{}, itend{};
-        ASEXT_CScriptDictionary_begin(dict, &it);
-        ASEXT_CScriptDictionary_end(dict, &itend);
-
-        size_t count = 0;
-        while (ASEXT_CScriptDictionary_CIterator_operator_NE(&it, &itend) && count < max_entries)
-        {
-            out_entries[count].keyObj = ASEXT_CScriptDictionary_CIterator_GetKey(&it);
-            out_entries[count].node   = it.cur;
-            count++;
-            ASEXT_CScriptDictionary_CIterator_operator_PP(&it);
-        }
-        return count;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        return 0;
-    }
-}
-#else
-
-static bool SafeGetDictSize(CScriptDictionary* dict, unsigned int& out_count)
-{
-    if (!dict || !ASEXT_CScriptDictionary_GetSize)
-        return false;
-    out_count = ASEXT_CScriptDictionary_GetSize(dict);
-    return true;
-}
-
-static size_t SafeIterateDict(CScriptDictionary* dict, DictEntryRaw* out_entries, size_t max_entries)
-{
-    if (!dict || !ASEXT_CScriptDictionary_begin || !ASEXT_CScriptDictionary_end ||
-        !ASEXT_CScriptDictionary_CIterator_operator_NE || !ASEXT_CScriptDictionary_CIterator_operator_PP ||
-        !ASEXT_CScriptDictionary_CIterator_GetKey)
-        return 0;
-
-    CScriptDictionary_CIterator it{}, itend{};
-    ASEXT_CScriptDictionary_begin(dict, &it);
-    ASEXT_CScriptDictionary_end(dict, &itend);
-
-    size_t count = 0;
-    while (ASEXT_CScriptDictionary_CIterator_operator_NE(&it, &itend) && count < max_entries)
-    {
-        out_entries[count].keyObj = ASEXT_CScriptDictionary_CIterator_GetKey(&it);
-        out_entries[count].node   = it.cur;
-        count++;
-        ASEXT_CScriptDictionary_CIterator_operator_PP(&it);
-    }
-    return count;
-}
-#endif
-
 class asIDBStringTypeEvaluator : public asIDBTypeEvaluator
 {
 public:
@@ -835,39 +755,16 @@ public:
         auto   ctx      = var->dbg.cache ? var->dbg.cache->ctx : nullptr;
         auto   engine   = ctx ? ctx->GetEngine() : nullptr;
         auto   type     = engine ? engine->GetTypeInfoById(var->address.typeId) : nullptr;
-        size_t typeSize = type ? type->GetSize() : 0;
-
         char   buf[257];
-        size_t len       = 0;
-        bool   truncated = false;
-        bool   ok        = false;
+        size_t len = 0;
 
-        if (typeSize == 36 || typeSize == sizeof(CString))
-        {
-            ok = SafeReadCString(rawPtr, buf, sizeof(buf), len, truncated);
-            if (!ok)
-                ok = SafeReadStdString(rawPtr, buf, sizeof(buf), len, truncated);
-        }
-        else if (typeSize == 24 || typeSize == sizeof(std_string))
-        {
-            ok = SafeReadStdString(rawPtr, buf, sizeof(buf), len, truncated);
-            if (!ok)
-                ok = SafeReadCString(rawPtr, buf, sizeof(buf), len, truncated);
-        }
-        else
-        {
-            ok = SafeReadCString(rawPtr, buf, sizeof(buf), len, truncated);
-            if (!ok)
-                ok = SafeReadStdString(rawPtr, buf, sizeof(buf), len, truncated);
-        }
-
-        if (!ok)
+        if (!var->dbg.hostAdapter.ReadString(type, rawPtr, buf, sizeof(buf), len, asIDBInspection::Variables))
         {
             var->value = "\"(invalid string)\"";
             return;
         }
 
-        if (truncated || len > 256)
+        if (len > 256)
         {
             var->value = fmt::format("\"{}...\" (len={})", std::string_view(buf, std::min<size_t>(len, sizeof(buf) - 1)), len);
         }
@@ -936,16 +833,10 @@ public:
 
         for (asUINT e = 0; e < type->GetEnumValueCount(); e++)
         {
-#if ANGELSCRIPT_VERSION >= 23800
-            asINT64     ov   = 0;
-            const char* name = type->GetEnumValueByIndex(e, &ov);
-#else
-            int         ov_int = 0;
-            const char* name   = type->GetEnumValueByIndex(e, &ov_int);
-            asINT64     ov     = ov_int;
-#endif
+            asIDBEnumValue enumValue = 0;
+            const char*    name      = type->GetEnumValueByIndex(e, &enumValue);
 
-            if (ov == v)
+            if (enumValue == v)
             {
                 var->value = fmt::format("{} ({})", name ? name : "???", v);
                 return;
@@ -1003,13 +894,9 @@ public:
 
         for (asUINT e = 0; e < type->GetEnumValueCount(); e++)
         {
-#if ANGELSCRIPT_VERSION >= 23800
-            const char* name = type->GetEnumValueByIndex(e, &ov);
-#else
-            int         ov_int = 0;
-            const char* name   = type->GetEnumValueByIndex(e, &ov_int);
-            ov                 = ov_int;
-#endif
+            asIDBEnumValue enumValue = 0;
+            const char*    name      = type->GetEnumValueByIndex(e, &enumValue);
+            ov                       = enumValue;
             std::bitset<sizeof(ov) * 8> obits(ov);
 
             // skip masks
@@ -1313,20 +1200,18 @@ void asIDBArrayTypeEvaluator::Evaluate(asIDBVariable::Ptr var) const
         return;
     }
 
-    size_t count      = 0;
-    void*  data       = nullptr;
-    int    elemTypeId = 0;
-    int    elemSize   = 0;
-
-    if (!SafeInspectScriptArray(objPtr, count, data, elemTypeId, elemSize))
+    auto           ctx  = var->dbg.cache ? var->dbg.cache->ctx : nullptr;
+    auto           type = ctx ? ctx->GetEngine()->GetTypeInfoById(var->address.typeId) : nullptr;
+    asIDBArrayView array;
+    if (!var->dbg.hostAdapter.InspectArray(type, objPtr, array, asIDBInspection::Variables))
     {
         var->value      = "\"(invalid array)\"";
         var->expandable = false;
         return;
     }
 
-    var->value      = fmt::format("{} elements", count);
-    var->expandable = (count > 0);
+    var->value      = fmt::format("{} elements", array.count);
+    var->expandable = (array.count > 0);
 }
 
 void asIDBArrayTypeEvaluator::Expand(asIDBVariable::Ptr var) const
@@ -1338,65 +1223,24 @@ void asIDBArrayTypeEvaluator::Expand(asIDBVariable::Ptr var) const
     if (!objPtr)
         return;
 
-    size_t count      = 0;
-    void*  data       = nullptr;
-    int    elemTypeId = 0;
-    int    elemSize   = 0;
-
-    if (!SafeInspectScriptArray(objPtr, count, data, elemTypeId, elemSize))
+    auto           ctx  = var->dbg.cache ? var->dbg.cache->ctx : nullptr;
+    auto           type = ctx ? ctx->GetEngine()->GetTypeInfoById(var->address.typeId) : nullptr;
+    asIDBArrayView array;
+    if (!var->dbg.hostAdapter.InspectArray(type, objPtr, array, asIDBInspection::Variables))
         return;
 
-    if (count == 0 || !data)
-        return;
-
-    auto ctx    = var->dbg.cache ? var->dbg.cache->ctx : nullptr;
-    auto engine = ctx ? ctx->GetEngine() : nullptr;
-
-    if (engine && elemTypeId <= 0)
-    {
-        auto type = engine->GetTypeInfoById(var->address.typeId);
-        if (type)
-            elemTypeId = type->GetSubTypeId();
-    }
-
-    std::string_view elemTypeName = "";
+    const size_t     count = array.count;
+    std::string_view elemTypeName;
     if (var->dbg.cache)
-        elemTypeName = var->dbg.cache->GetTypeNameFromType({elemTypeId, asTM_NONE});
-
-    size_t elemStride = sizeof(void*);
-    if (elemTypeId & asTYPEID_MASK_OBJECT)
-    {
-        // In Sven Co-op CScriptArray, all object elements (both value objects like CString
-        // and handles like CBaseEntity@) are stored as 4-byte pointers in the array buffer.
-        elemStride = sizeof(void*);
-    }
-    else if (elemSize > 0 && elemSize <= 64)
-    {
-        elemStride = static_cast<size_t>(elemSize);
-    }
-    else if (engine)
-    {
-        int primSize = engine->GetSizeOfPrimitiveType(elemTypeId);
-        elemStride = primSize > 0 ? static_cast<size_t>(primSize) : sizeof(void*);
-    }
+        elemTypeName = var->dbg.cache->GetTypeNameFromType({array.elementTypeId, asTM_NONE});
 
     constexpr size_t MAX_EXPAND_ELEMENTS = 256;
-    size_t           limit               = std::min<size_t>(count, MAX_EXPAND_ELEMENTS);
-
+    const size_t     limit               = std::min(count, MAX_EXPAND_ELEMENTS);
     for (size_t i = 0; i < limit; i++)
     {
-        void* slot     = static_cast<char*>(data) + i * elemStride;
-        void* elemAddr = slot;
-
-        // In CScriptArray, value objects (e.g. string) store pointers to the allocated objects
-        // in each buffer slot. We must dereference the slot so the evaluator receives the
-        // direct pointer to the object (CString*) instead of a pointer to the slot (CString**).
-        if ((elemTypeId & asTYPEID_MASK_OBJECT) && !(elemTypeId & (asTYPEID_HANDLETOCONST | asTYPEID_OBJHANDLE)))
-        {
-            elemAddr = SafeReadPointer(slot);
-        }
-
-        var->CreateChildVariable(fmt::format("[{}]", i), asIDBVarAddr{elemTypeId, false, elemAddr}, elemTypeName);
+        void* address = nullptr;
+        if (var->dbg.hostAdapter.ReadArrayElement(array, i, address))
+            var->CreateChildVariable(fmt::format("[{}]", i), asIDBVarAddr{array.elementTypeId, false, address}, elemTypeName);
     }
 
     if (count > MAX_EXPAND_ELEMENTS)
@@ -1428,8 +1272,8 @@ void asIDBDictionaryTypeEvaluator::Evaluate(asIDBVariable::Ptr var) const
         return;
     }
 
-    unsigned int count = 0;
-    if (!SafeGetDictSize(reinterpret_cast<CScriptDictionary*>(objPtr), count))
+    size_t count = 0;
+    if (!var->dbg.hostAdapter.GetDictionarySize(objPtr, count))
     {
         var->value      = "\"(invalid dictionary)\"";
         var->expandable = false;
@@ -1449,42 +1293,16 @@ void asIDBDictionaryTypeEvaluator::Expand(asIDBVariable::Ptr var) const
     if (!objPtr)
         return;
 
-    std::vector<DictEntryRaw> entries(1000);
-    size_t                    count = SafeIterateDict(reinterpret_cast<CScriptDictionary*>(objPtr), entries.data(), entries.size());
-
+    std::vector<asIDBDictionaryEntry> entries(1000);
+    const size_t                      count = var->dbg.hostAdapter.ReadDictionary(objPtr, entries.data(), entries.size());
     for (size_t i = 0; i < count; i++)
     {
-        const CString* keyObj = entries[i].keyObj;
-        char           keyBuf[257];
-        size_t         keyLen    = 0;
-        bool           truncated = false;
-        std::string    keyName;
-        if (keyObj && SafeReadCString(keyObj, keyBuf, sizeof(keyBuf), keyLen, truncated))
-        {
-            keyName = std::string(keyBuf, keyLen);
-        }
-        else
-        {
-            keyName = fmt::format("entry_{}", i);
-        }
+        const auto&      entry = entries[i];
+        std::string_view typeName;
+        if (var->dbg.cache)
+            typeName = var->dbg.cache->GetTypeNameFromType({entry.typeId, asTM_NONE});
 
-        void* node = entries[i].node;
-        if (node && SafeProbeMemoryReadable(static_cast<char*>(node) + 0x30, 0x10))
-        {
-            int   valTypeId = SafeReadInt32(static_cast<char*>(node) + 0x38);
-            void* valAddr   = static_cast<char*>(node) + 0x30;
-
-            if ((valTypeId & asTYPEID_MASK_OBJECT) && !(valTypeId & asTYPEID_OBJHANDLE))
-            {
-                valAddr = SafeReadPointer(valAddr);
-            }
-
-            std::string_view typeName = "";
-            if (var->dbg.cache)
-                typeName = var->dbg.cache->GetTypeNameFromType({valTypeId, asTM_NONE});
-
-            var->CreateChildVariable(keyName, asIDBVarAddr{valTypeId, false, valAddr}, typeName);
-        }
+        var->CreateChildVariable(entry.key, asIDBVarAddr{entry.typeId, false, entry.address}, typeName);
     }
 }
 
@@ -1515,18 +1333,17 @@ const asIDBTypeEvaluator& asIDBCache::GetEvaluator(const asIDBVarAddr& id) const
             return funcdefType;
         }
 
-        const char* typeName = type->GetName();
-        if (typeName && strcmp(typeName, "string") == 0)
+        if (dbg.hostAdapter.IsStringType(type))
         {
             static const asIDBStringTypeEvaluator stringType;
             return stringType;
         }
-        else if (typeName && (strcmp(typeName, "array") == 0 || (type->GetFlags() & asOBJ_TEMPLATE)))
+        else if (dbg.hostAdapter.IsArrayType(type))
         {
             static const asIDBArrayTypeEvaluator arrayType;
             return arrayType;
         }
-        else if (typeName && strcmp(typeName, "dictionary") == 0)
+        else if (dbg.hostAdapter.IsDictionaryType(type))
         {
             static const asIDBDictionaryTypeEvaluator dictType;
             return dictType;
@@ -1601,32 +1418,30 @@ const asIDBTypeEvaluator& asIDBCache::GetEvaluator(const asIDBVarAddr& id) const
     }
 }
 
-#include <filesystem>
-#include <fstream>
 
 std::string asIDBFileWorkspace::PathToSection(const std::string_view v) const
 {
-    return std::filesystem::relative(v, base_path).generic_string();
+    std::filesystem::path path(v);
+    if (sections.find(v) != sections.end())
+        return std::string(v);
+
+    std::error_code ec;
+    auto            relative = std::filesystem::relative(path, base_path, ec);
+    return ec || relative.empty() ? path.generic_string() : relative.generic_string();
 }
 
 std::string asIDBFileWorkspace::SectionToPath(const std::string_view v) const
 {
-    return (base_path + '/').append(v);
+    auto            path = std::filesystem::path(base_path) / v;
+    std::error_code ec;
+    auto            absolute = std::filesystem::absolute(path, ec);
+    return (ec ? path : absolute).lexically_normal().generic_string();
 }
 
 std::string asIDBFileWorkspace::SectionSource(const std::string_view v) const
 {
-    std::filesystem::path p(SectionToPath(v));
-    size_t                size = std::filesystem::file_size(p);
-    std::string           data(size, '\0');
-    std::ifstream         in(p);
-    in.read(data.data(), size);
-
-    // not sure why this is necessary but here we go
-    if (auto nul = data.find_first_of('\0'))
-        data.erase(nul);
-
-    return data;
+    std::ifstream in(SectionToPath(v), std::ios::binary);
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
 }
 
 void asIDBFileWorkspace::CompileScriptSources()
@@ -1640,7 +1455,7 @@ void asIDBFileWorkspace::CompileScriptSources()
             for (size_t f = 0; f < module->GetFunctionCount(); f++)
             {
 #if ANGELSCRIPT_VERSION >= 23800
-                const char* section;
+                const char* section = nullptr;
                 module->GetFunctionByIndex(f)->GetDeclaredAt(&section, nullptr, nullptr);
 #else
                 const char* section = module->GetFunctionByIndex(f)->GetScriptSectionName();
@@ -1656,13 +1471,18 @@ void asIDBFileWorkspace::CompileBreakpointPositions()
     potential_breakpoints.clear();
 
     auto addFunctionBreakpointLocations = [&](asIScriptFunction* func) {
+        if (!func)
+            return;
 #if ANGELSCRIPT_VERSION >= 23800
         for (int i = 0; i < func->GetLineEntryCount(); i++)
         {
-            const char* section;
-            int         line, col;
-            func->GetLineEntry(i, &line, &col, &section, nullptr);
-            potential_breakpoints[section].insert(asIDBLineCol{line, col});
+            const char* section = nullptr;
+            int         line = 0, col = 0;
+            if (func->GetLineEntry(i, &line, &col, &section, nullptr) >= 0 && section && *section)
+            {
+                AddSection(section);
+                potential_breakpoints[section].insert(asIDBLineCol{line, col});
+            }
         }
 #else
         const char* section = func->GetScriptSectionName();
@@ -1741,7 +1561,7 @@ void asIDBFileWorkspace::CompileBreakpointPositions()
         {
             // Do not break for foreign context stepping
         }
-        // 2. Do not break inside virtual engine sections (like __Global__BaseAnimating) during stepping
+        // 2. Skip virtual sections while stepping
         else if (section && debugger->workspace && debugger->workspace->SectionIsVirtual(section))
         {
             // Skip stepping into virtual/native engine glue
@@ -1828,7 +1648,7 @@ void asIDBFileWorkspace::CompileBreakpointPositions()
             {
                 for (auto it = debugger->breakpoints.begin(); it != debugger->breakpoints.end(); ++it)
                 {
-                    if (PathMatchesSection(section, it->first))
+                    if (debugger->workspace ? debugger->workspace->MatchesSection(section, it->first) : PathMatchesSection(section, it->first))
                     {
                         entries = it;
                         break;
@@ -1849,7 +1669,7 @@ void asIDBFileWorkspace::CompileBreakpointPositions()
                             // 1. Evaluate condition AST (if false or error, continue immediately; rate-limit error output)
                             if (lines.conditionAst)
                             {
-                                as_expr::Value condVal = lines.conditionAst->Evaluate(ctx, 0).DereferenceIfAddress();
+                                as_expr::Value condVal = lines.conditionAst->Evaluate(ctx, 0, debugger->hostAdapter).DereferenceIfAddress();
                                 if (!condVal.ToBool())
                                     continue;
                             }
@@ -1881,7 +1701,7 @@ void asIDBFileWorkspace::CompileBreakpointPositions()
                             // 3. Evaluate logMessage / logpoint (interpolate {expr} ASTs, emit DAP output, do not pause)
                             if (!lines.logTemplate.empty())
                             {
-                                std::string msg = lines.logTemplate.Evaluate(ctx, 0);
+                                std::string msg = lines.logTemplate.Evaluate(ctx, 0, debugger->hostAdapter);
                                 debugger->SendLogOutput(fmt::format("[Logpoint] {}\n", msg));
                                 continue;
                             }
@@ -1907,20 +1727,28 @@ void asIDBFileWorkspace::CompileBreakpointPositions()
 
         if (!debugger->function_breakpoints.empty())
         {
-            int  decl_row;
             auto func = ctx->GetFunction(0);
 
-            if (func)
+            if (func && debugger->function_breakpoints.find(func->GetName()) != debugger->function_breakpoints.end())
             {
 #if ANGELSCRIPT_VERSION >= 23800
-                func->GetDeclaredAt(nullptr, &decl_row, nullptr);
+                int declarationLine = 0;
+                func->GetDeclaredAt(nullptr, &declarationLine, nullptr);
+                const int entries = func->GetLineEntryCount();
+                for (int i = 0; i < entries; ++i)
+                {
+                    int line = 0;
+                    if (func->GetLineEntry(i, &line, nullptr, nullptr, nullptr) >= 0 && line >= declarationLine)
+                    {
+                        if (row == line)
+                            break_from_bp = true;
+                        break;
+                    }
+                }
 #else
-                decl_row = func->FindNextLineWithCode(1);
-#endif
-
-                if (debugger->function_breakpoints.find(func->GetName()) != debugger->function_breakpoints.end() &&
-                    row == func->FindNextLineWithCode(decl_row))
+                if (row == func->FindNextLineWithCode(func->FindNextLineWithCode(1)))
                     break_from_bp = true;
+#endif
             }
         }
     }
@@ -1992,27 +1820,23 @@ void asIDBDebugger::ClearHookedContexts()
     hooked_contexts.clear();
 }
 
-void asIDBDebugger::HookContext(asIScriptContext* ctx, bool has_work)
+bool asIDBDebugger::HookContext(asIScriptContext* ctx, bool has_work)
 {
     if (ctx->GetState() != asEXECUTION_EXCEPTION)
     {
         if (workspace && ctx->GetEngine())
             workspace->engines.insert(ctx->GetEngine());
 
-        if (has_work)
-        {
-            ctx->SetLineCallback(asFUNCTION(asIDBDebugger::LineCallback), this, asCALL_CDECL);
-        }
-        ctx->SetExceptionCallback(asFUNCTION(asIDBDebugger::ExceptionCallback), this, asCALL_CDECL);
+        const int lineResult      = has_work ? ctx->SetLineCallback(asFUNCTION(asIDBDebugger::LineCallback), this, asCALL_CDECL) : 0;
+        const int exceptionResult = ctx->SetExceptionCallback(asFUNCTION(asIDBDebugger::ExceptionCallback), this, asCALL_CDECL);
+        return lineResult >= 0 && exceptionResult >= 0;
     }
+    return false;
 }
 
 void asIDBDebugger::DebugBreak(asIScriptContext* ctx)
 {
-    if (ASDebug_IsVerbose())
-    {
-        ASDebug_Log("DebugBreak ENTERED! ctx=%p", ctx);
-    }
+    OnDebugBreak(ctx);
     if (workspace && ctx->GetEngine())
         workspace->engines.insert(ctx->GetEngine());
 
@@ -2150,3 +1974,5 @@ bool asIDBDebugger::ToggleBreakpoint(std::string_view section, int line)
     UpdateHasWorkAtomic();
     return true;
 }
+
+END_AS_NAMESPACE

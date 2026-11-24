@@ -3,13 +3,18 @@
 
 #pragma once
 
+#include <angelscript.h>
 #include <dap/io.h>
 #include <dap/network.h>
 #include <dap/protocol.h>
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
+
+BEGIN_AS_NAMESPACE
 
 class asIDBDebugger;
 class asIDBDAPClient;
@@ -31,7 +36,9 @@ public:
     // ptr back to debugger
     asIDBDebugger* dbg;
 
-    asIDBDAPServer(int port, asIDBDebugger* debugger);
+    using Notice = std::function<void(const std::string&)>;
+    asIDBDAPServer(int port, asIDBDebugger* debugger, std::string host = "0.0.0.0", bool fallbackPorts = true,
+                    Notice notice = {}, bool acceptLaunch = false);
 
     virtual ~asIDBDAPServer();
 
@@ -51,9 +58,10 @@ public:
     }
 
     // server management
-    void StartServer();
+    bool StartServer();
     void StopServer();
     void Tick();
+    bool ClientConfigured() const;
 
     // client management
 
@@ -65,6 +73,11 @@ public:
     }
 
 protected:
+    std::string host;
+    bool        fallbackPorts;
+    Notice      notice;
+    bool        acceptLaunch;
+
     // server ptr
     std::unique_ptr<dap::net::Server> server;
 
@@ -76,3 +89,5 @@ protected:
     void ClientError(const char* msg);
     void SendEventToClient(const dap::TypeInfo* typeinfo, const void* event);
 };
+
+END_AS_NAMESPACE

@@ -4,6 +4,8 @@
 #include "as_helpers.h"
 #include <stdexcept>
 
+BEGIN_AS_NAMESPACE
+
 asIDBValue::asIDBValue(asIScriptEngine* engine, void* ptr, int typeId, bool reference) :
     engine(engine),
     typeId(typeId)
@@ -275,3 +277,5 @@ bool asIDBObjectIteratorHelper::Validate()
 
     return true;
 }
+
+END_AS_NAMESPACE

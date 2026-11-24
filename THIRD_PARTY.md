@@ -1,8 +1,8 @@
 # Third-party notices
 
-The plugin implementation is original MIT-licensed code by Gaftherman.
+Project code is MIT-licensed. See the individual debugger source notices for
+upstream authorship and attribution.
 Dependencies retain their original source, copyright notices and licenses.
-The plugin license does not replace dependency or individual-file licenses.
 
 - [Metamod](https://github.com/metamod-fallguys/metamod): see
   `metamod/LICENSE` and individual source/header notices. Legacy Metamod files
@@ -14,7 +14,11 @@ The plugin license does not replace dependency or individual-file licenses.
   copyright Google LLC). Provides the C++ Debug Adapter Protocol implementation.
 - [nlohmann/json](https://github.com/nlohmann/json): see `nlohmann/json` source (MIT License,
   copyright Niels Lohmann). Transitive JSON serializer used by cppdap.
-- Transitive dependencies include the customized AngelScript SDK, Capstone,
+- [AngelScript 2.39.0](https://github.com/anjo76/angelscript/tree/v2.39.0):
+  the standalone host supplies the engine and any standard add-ons. See the
+  AngelScript source license and the notices in the add-on directories
+  (zlib license, copyright Andreas Jönsson).
+- Sven plugin dependencies include the customized AngelScript SDK, Capstone,
   procmap, RapidJSON, Chocobo1Hash and FormatValidation. Their notices remain
   in the dependency source trees fetched by Git or CMake.
 

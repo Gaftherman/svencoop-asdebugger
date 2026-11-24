@@ -3,6 +3,37 @@
 #include <fstream>
 #include <system_error>
 
+namespace
+{
+std::string_view ExtractScriptsSubpath(std::string_view p)
+{
+    if (p.empty())
+        return p;
+
+    if (p.length() >= 8)
+    {
+        std::string_view prefix = p.substr(0, 8);
+        if (PathEqualsCaseInsensitive(prefix, "scripts/") || PathEqualsCaseInsensitive(prefix, "scripts\\"))
+            return p;
+    }
+
+    for (size_t i = 0; i + 8 < p.length(); ++i)
+    {
+        char c0 = p[i];
+        if (c0 == '/' || c0 == '\\')
+        {
+            std::string_view sub = p.substr(i + 1, 8);
+            if (PathEqualsCaseInsensitive(sub, "scripts/") || PathEqualsCaseInsensitive(sub, "scripts\\"))
+            {
+                return p.substr(i + 1);
+            }
+        }
+    }
+
+    return {};
+}
+} // namespace
+
 asSCWorkspace::asSCWorkspace(std::string_view basePath, std::initializer_list<asIScriptEngine*> engines) :
     asIDBWorkspace(engines),
     base_path(basePath)
@@ -19,6 +50,15 @@ asSCWorkspace::asSCWorkspace(std::string_view basePath, std::initializer_list<as
     }
 
     CompileScriptSources();
+}
+
+bool asSCWorkspace::MatchesSection(std::string_view path, std::string_view section) const
+{
+    if (PathMatchesSection(path, section))
+        return true;
+
+    // Game and editor paths may use different prefixes before the scripts directory.
+    return PathMatchesSection(ExtractScriptsSubpath(path), ExtractScriptsSubpath(section));
 }
 
 std::string asSCWorkspace::PathToSection(const std::string_view v) const
@@ -39,7 +79,7 @@ std::string asSCWorkspace::PathToSection(const std::string_view v) const
     // 2. Try relative / suffix match against existing sections on directory boundary
     for (const auto& sec : sections)
     {
-        if (PathMatchesSection(sec.section, pathStr))
+        if (MatchesSection(sec.section, pathStr))
             return std::string(sec.section);
     }
 
@@ -47,7 +87,7 @@ std::string asSCWorkspace::PathToSection(const std::string_view v) const
     for (const auto& sec : sections)
     {
         std::string resolved = SectionToPath(sec.section);
-        if (!resolved.empty() && (PathEqualsCaseInsensitive(resolved, pathStr) || PathMatchesSection(resolved, pathStr)))
+        if (!resolved.empty() && (PathEqualsCaseInsensitive(resolved, pathStr) || MatchesSection(resolved, pathStr)))
             return std::string(sec.section);
     }
 
@@ -55,14 +95,14 @@ std::string asSCWorkspace::PathToSection(const std::string_view v) const
     std::string withBase = base_path + "/" + pathStr;
     for (const auto& sec : sections)
     {
-        if (PathEqualsCaseInsensitive(sec.section, withBase) || PathMatchesSection(sec.section, withBase))
+        if (PathEqualsCaseInsensitive(sec.section, withBase) || MatchesSection(sec.section, withBase))
             return std::string(sec.section);
     }
 
     std::string withScripts = "scripts/" + pathStr;
     for (const auto& sec : sections)
     {
-        if (PathEqualsCaseInsensitive(sec.section, withScripts) || PathMatchesSection(sec.section, withScripts))
+        if (PathEqualsCaseInsensitive(sec.section, withScripts) || MatchesSection(sec.section, withScripts))
             return std::string(sec.section);
     }
 
@@ -72,7 +112,7 @@ std::string asSCWorkspace::PathToSection(const std::string_view v) const
     {
         for (const auto& sec : sections)
         {
-            if (PathMatchesSection(sec.section, scriptsSub))
+            if (MatchesSection(sec.section, scriptsSub))
                 return std::string(sec.section);
         }
     }

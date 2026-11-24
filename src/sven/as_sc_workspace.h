@@ -19,6 +19,7 @@ public:
 
     virtual std::string SectionSource(const std::string_view v) const override;
 
-    void CompileScriptSources();
-    void CompileBreakpointPositions();
+    bool MatchesSection(std::string_view path, std::string_view section) const override;
+    void CompileScriptSources() override;
+    void CompileBreakpointPositions() override;
 };

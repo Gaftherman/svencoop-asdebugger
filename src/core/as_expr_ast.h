@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
-#include <angelscript.h>
+#include "as_debugger_host.h"
 #include "as_safe_memory.h"
 #include "as_helpers.h"
 #include <cstdint>
@@ -15,6 +15,8 @@
 #include <sstream>
 #include <algorithm>
 #include <optional>
+
+BEGIN_AS_NAMESPACE
 
 namespace as_expr
 {
@@ -44,6 +46,7 @@ struct Value
     int              typeId   = 0;
     bool             isHandle = false;
     asIScriptEngine* engine   = nullptr;
+    const asIDBHostAdapter* adapter  = nullptr;
 
     static Value MakeNull()
     {
@@ -92,7 +95,7 @@ struct Value
         return v;
     }
 
-    static Value MakeAddress(void* ptr, int typeId, bool isHandle, asIScriptEngine* engine)
+    static Value MakeAddress(void* ptr, int typeId, bool isHandle, asIScriptEngine* engine, const asIDBHostAdapter& adapter)
     {
         Value v;
         v.kind     = ValueKind::Address;
@@ -100,6 +103,7 @@ struct Value
         v.typeId   = typeId;
         v.isHandle = isHandle;
         v.engine   = engine;
+        v.adapter  = &adapter;
         return v;
     }
 
@@ -168,6 +172,21 @@ struct Value
         return "unknown";
     }
 
+    asITypeInfo* GetTypeInfo() const
+    {
+        return engine && typeId ? engine->GetTypeInfoById(typeId) : nullptr;
+    }
+
+    bool IsScriptString() const
+    {
+        return adapter && adapter->IsStringType(GetTypeInfo());
+    }
+
+    bool ReadString(const void* object, char* buffer, size_t capacity, size_t& length) const
+    {
+        return adapter && adapter->ReadString(GetTypeInfo(), object, buffer, capacity, length, asIDBInspection::Expression);
+    }
+
     std::string ToString() const
     {
         switch (kind)
@@ -194,21 +213,12 @@ struct Value
                 if (!p)
                     return "null";
 
-                // Check if string object
-                if (engine)
+                if (IsScriptString())
                 {
-                    asITypeInfo* ti = engine->GetTypeInfoById(typeId);
-                    if (ti && std::string_view(ti->GetName()) == "string")
-                    {
-                        char   buf[512];
-                        size_t len       = 0;
-                        bool   truncated = false;
-                        if (SafeReadCString(p, buf, sizeof(buf), len, truncated) ||
-                            SafeReadStdString(p, buf, sizeof(buf), len, truncated))
-                        {
-                            return std::string(buf, len);
-                        }
-                    }
+                    char   buf[512];
+                    size_t len = 0;
+                    if (ReadString(p, buf, sizeof(buf), len))
+                        return std::string(buf, std::min(len, sizeof(buf) - 1));
                 }
 
                 std::ostringstream ss;
@@ -265,16 +275,12 @@ struct Value
                 {
                     return MakeInt(*reinterpret_cast<const int*>(p));
                 }
-                if (std::string_view(ti->GetName()) == "string")
+                if (IsScriptString())
                 {
                     char   buf[512];
-                    size_t len       = 0;
-                    bool   truncated = false;
-                    if (SafeReadCString(p, buf, sizeof(buf), len, truncated) ||
-                        SafeReadStdString(p, buf, sizeof(buf), len, truncated))
-                    {
-                        return MakeString(std::string(buf, len));
-                    }
+                    size_t len = 0;
+                    if (ReadString(p, buf, sizeof(buf), len))
+                        return MakeString(std::string(buf, std::min(len, sizeof(buf) - 1)));
                 }
             }
         }
@@ -287,7 +293,7 @@ class Node
 {
 public:
     virtual ~Node() = default;
-    virtual Value Evaluate(asIScriptContext* ctx, asUINT stackLevel) const = 0;
+    virtual Value Evaluate(asIScriptContext* ctx, asUINT stackLevel, const asIDBHostAdapter& adapter) const = 0;
 };
 
 using NodePtr = std::shared_ptr<Node>;
@@ -297,7 +303,7 @@ class LiteralNode : public Node
     Value m_val;
 public:
     explicit LiteralNode(Value v) : m_val(std::move(v)) {}
-    Value Evaluate(asIScriptContext*, asUINT) const override
+    Value Evaluate(asIScriptContext*, asUINT, const asIDBHostAdapter&) const override
     {
         return m_val;
     }
@@ -311,7 +317,7 @@ public:
     IdentifierNode(std::string name, std::string ns = "") :
         m_name(std::move(name)), m_ns(std::move(ns)) {}
 
-    Value Evaluate(asIScriptContext* ctx, asUINT stackLevel) const override
+    Value Evaluate(asIScriptContext* ctx, asUINT stackLevel, const asIDBHostAdapter& adapter) const override
     {
         if (!ctx || stackLevel >= ctx->GetCallstackSize())
             return Value::MakeNull();
@@ -326,7 +332,7 @@ public:
                 void* thisPtr = ctx->GetThisPointer(stackLevel);
                 int   thisId  = ctx->GetThisTypeId(stackLevel);
                 if (thisPtr && thisId)
-                    return Value::MakeAddress(thisPtr, thisId, false, engine);
+                    return Value::MakeAddress(thisPtr, thisId, false, engine, adapter);
                 return Value::MakeNull();
             }
 
@@ -341,7 +347,7 @@ public:
                 {
                     void* addr = ctx->GetAddressOfVar(i, stackLevel);
                     bool  isH  = (typeId & (asTYPEID_HANDLETOCONST | asTYPEID_OBJHANDLE)) != 0;
-                    return Value::MakeAddress(addr, typeId, isH, engine).DereferenceIfAddress();
+                    return Value::MakeAddress(addr, typeId, isH, engine, adapter).DereferenceIfAddress();
                 }
             }
 
@@ -350,8 +356,8 @@ public:
             int   thisId  = ctx->GetThisTypeId(stackLevel);
             if (thisPtr && thisId && engine)
             {
-                Value thisVal = Value::MakeAddress(thisPtr, thisId, false, engine);
-                Value memberVal = ResolveMember(thisVal, m_name, engine);
+                Value thisVal   = Value::MakeAddress(thisPtr, thisId, false, engine, adapter);
+                Value memberVal = ResolveMember(thisVal, m_name, engine, adapter);
                 if (memberVal.kind != ValueKind::Null || memberVal.addr != nullptr)
                     return memberVal.DereferenceIfAddress();
             }
@@ -375,7 +381,7 @@ public:
                     {
                         void* addr = mod->GetAddressOfGlobalVar(i);
                         bool  isH  = (gTypeId & (asTYPEID_HANDLETOCONST | asTYPEID_OBJHANDLE)) != 0;
-                        return Value::MakeAddress(addr, gTypeId, isH, engine).DereferenceIfAddress();
+                        return Value::MakeAddress(addr, gTypeId, isH, engine, adapter).DereferenceIfAddress();
                     }
                 }
             }
@@ -390,7 +396,7 @@ public:
                     continue;
                 for (asUINT v = 0; v < enumType->GetEnumValueCount(); ++v)
                 {
-                    int         val = 0;
+                    asIDBEnumValue val   = 0;
                     const char* vName = enumType->GetEnumValueByIndex(v, &val);
                     if (vName && m_name == vName)
                         return Value::MakeInt(val);
@@ -413,7 +419,7 @@ public:
                     if (m_ns.empty() || (propNs && m_ns == propNs))
                     {
                         bool isH = (propType & (asTYPEID_HANDLETOCONST | asTYPEID_OBJHANDLE)) != 0;
-                        return Value::MakeAddress(propAddr, propType, isH, engine).DereferenceIfAddress();
+                        return Value::MakeAddress(propAddr, propType, isH, engine, adapter).DereferenceIfAddress();
                     }
                 }
             }
@@ -427,7 +433,7 @@ public:
                     continue;
                 for (asUINT v = 0; v < enumType->GetEnumValueCount(); ++v)
                 {
-                    int         val = 0;
+                    asIDBEnumValue val   = 0;
                     const char* vName = enumType->GetEnumValueByIndex(v, &val);
                     if (vName && m_name == vName)
                         return Value::MakeInt(val);
@@ -438,7 +444,7 @@ public:
         return Value::MakeNull();
     }
 
-    static Value ResolveMember(const Value& objVal, const std::string& memberName, asIScriptEngine* engine);
+    static Value ResolveMember(const Value& objVal, const std::string& memberName, asIScriptEngine* engine, const asIDBHostAdapter& adapter);
 };
 
 enum class UnaryOp
@@ -457,9 +463,9 @@ class UnaryOpNode : public Node
 public:
     UnaryOpNode(UnaryOp op, NodePtr child) : m_op(op), m_child(std::move(child)) {}
 
-    Value Evaluate(asIScriptContext* ctx, asUINT stackLevel) const override
+    Value Evaluate(asIScriptContext* ctx, asUINT stackLevel, const asIDBHostAdapter& adapter) const override
     {
-        Value v = m_child->Evaluate(ctx, stackLevel).DereferenceIfAddress();
+        Value v = m_child->Evaluate(ctx, stackLevel, adapter).DereferenceIfAddress();
         switch (m_op)
         {
             case UnaryOp::Not:
@@ -520,28 +526,28 @@ public:
     BinaryOpNode(BinaryOp op, NodePtr left, NodePtr right) :
         m_op(op), m_left(std::move(left)), m_right(std::move(right)) {}
 
-    Value Evaluate(asIScriptContext* ctx, asUINT stackLevel) const override
+    Value Evaluate(asIScriptContext* ctx, asUINT stackLevel, const asIDBHostAdapter& adapter) const override
     {
         // Short-circuiting logical operators:
         if (m_op == BinaryOp::Or)
         {
-            Value l = m_left->Evaluate(ctx, stackLevel).DereferenceIfAddress();
+            Value l = m_left->Evaluate(ctx, stackLevel, adapter).DereferenceIfAddress();
             if (l.IsTruthy())
                 return Value::MakeBool(true);
-            Value r = m_right->Evaluate(ctx, stackLevel).DereferenceIfAddress();
+            Value r = m_right->Evaluate(ctx, stackLevel, adapter).DereferenceIfAddress();
             return Value::MakeBool(r.IsTruthy());
         }
         if (m_op == BinaryOp::And)
         {
-            Value l = m_left->Evaluate(ctx, stackLevel).DereferenceIfAddress();
+            Value l = m_left->Evaluate(ctx, stackLevel, adapter).DereferenceIfAddress();
             if (!l.IsTruthy())
                 return Value::MakeBool(false);
-            Value r = m_right->Evaluate(ctx, stackLevel).DereferenceIfAddress();
+            Value r = m_right->Evaluate(ctx, stackLevel, adapter).DereferenceIfAddress();
             return Value::MakeBool(r.IsTruthy());
         }
 
-        Value l = m_left->Evaluate(ctx, stackLevel);
-        Value r = m_right->Evaluate(ctx, stackLevel);
+        Value l = m_left->Evaluate(ctx, stackLevel, adapter);
+        Value r = m_right->Evaluate(ctx, stackLevel, adapter);
 
         // Handle identity: 'is' and '!is'
         if (m_op == BinaryOp::Is || m_op == BinaryOp::NotIs)
@@ -665,10 +671,10 @@ public:
     MemberAccessNode(NodePtr target, std::string member) :
         m_target(std::move(target)), m_member(std::move(member)) {}
 
-    Value Evaluate(asIScriptContext* ctx, asUINT stackLevel) const override
+    Value Evaluate(asIScriptContext* ctx, asUINT stackLevel, const asIDBHostAdapter& adapter) const override
     {
-        Value obj = m_target->Evaluate(ctx, stackLevel);
-        return IdentifierNode::ResolveMember(obj, m_member, ctx ? ctx->GetEngine() : nullptr).DereferenceIfAddress();
+        Value obj = m_target->Evaluate(ctx, stackLevel, adapter);
+        return IdentifierNode::ResolveMember(obj, m_member, ctx ? ctx->GetEngine() : nullptr, adapter).DereferenceIfAddress();
     }
 };
 
@@ -680,17 +686,17 @@ public:
     IndexAccessNode(NodePtr target, NodePtr index) :
         m_target(std::move(target)), m_index(std::move(index)) {}
 
-    Value Evaluate(asIScriptContext* ctx, asUINT stackLevel) const override
+    Value Evaluate(asIScriptContext* ctx, asUINT stackLevel, const asIDBHostAdapter& adapter) const override
     {
-        Value obj = m_target->Evaluate(ctx, stackLevel);
-        Value idx = m_index->Evaluate(ctx, stackLevel).DereferenceIfAddress();
+        Value obj = m_target->Evaluate(ctx, stackLevel, adapter);
+        Value idx = m_index->Evaluate(ctx, stackLevel, adapter).DereferenceIfAddress();
 
         void* p = obj.ResolvePointer();
         if (!p)
             return Value::MakeNull();
 
         // 1. String indexing str[i] -> returns char code
-        if (obj.kind == ValueKind::String || (obj.engine && obj.typeId && std::string_view(obj.engine->GetTypeInfoById(obj.typeId)->GetName()) == "string"))
+        if (obj.kind == ValueKind::String || obj.IsScriptString())
         {
             std::string s = (obj.kind == ValueKind::String) ? obj.sVal : obj.ToString();
             int64_t i = idx.iVal;
@@ -701,58 +707,21 @@ public:
             return Value::MakeNull();
         }
 
-        // 2. CScriptArray inspection
-        size_t count      = 0;
-        void*  arrData    = nullptr;
-        int    elemTypeId = 0;
-        int    elemSize   = 0;
-        if (SafeInspectScriptArray(p, count, arrData, elemTypeId, elemSize))
+        asIDBArrayView array;
+        if (adapter.InspectArray(obj.GetTypeInfo(), p, array, asIDBInspection::Expression))
         {
-            int64_t i = idx.iVal;
-            if (i < 0 || static_cast<size_t>(i) >= count || !arrData)
+            void* element = nullptr;
+            if (idx.iVal < 0 || static_cast<uint64_t>(idx.iVal) >= array.count ||
+                !adapter.ReadArrayElement(array, static_cast<size_t>(idx.iVal), element))
                 return Value::MakeNull();
 
-            size_t elemStride = sizeof(void*);
-            if (elemTypeId & asTYPEID_MASK_OBJECT)
-            {
-                elemStride = sizeof(void*);
-            }
-            else if (elemSize > 0 && elemSize <= 64)
-            {
-                elemStride = static_cast<size_t>(elemSize);
-            }
-            else if (obj.engine)
-            {
-                int ps = obj.engine->GetSizeOfPrimitiveType(elemTypeId);
-                elemStride = ps > 0 ? static_cast<size_t>(ps) : sizeof(void*);
-            }
-
-            void* slot = static_cast<char*>(arrData) + i * elemStride;
-            void* elemAddr = slot;
-            bool  isH = (elemTypeId & (asTYPEID_HANDLETOCONST | asTYPEID_OBJHANDLE)) != 0;
-
-            if ((elemTypeId & asTYPEID_MASK_OBJECT) && !isH)
-            {
-                elemAddr = SafeReadPointer(slot);
-            }
-
-            return Value::MakeAddress(elemAddr, elemTypeId, isH, obj.engine).DereferenceIfAddress();
+            const bool isHandle = (array.elementTypeId & (asTYPEID_HANDLETOCONST | asTYPEID_OBJHANDLE)) != 0;
+            return Value::MakeAddress(element, array.elementTypeId, isHandle, obj.engine, adapter).DereferenceIfAddress();
         }
 
-        // 3. Vector components [0]=x, [1]=y, [2]=z
-        if (obj.engine && obj.typeId)
-        {
-            asITypeInfo* ti = obj.engine->GetTypeInfoById(obj.typeId);
-            if (ti && std::string_view(ti->GetName()) == "Vector")
-            {
-                int64_t i = idx.iVal;
-                if (i >= 0 && i < 3)
-                {
-                    float* fArr = reinterpret_cast<float*>(p);
-                    return Value::MakeFloat(fArr[i]);
-                }
-            }
-        }
+        float value = 0.0f;
+        if (adapter.ReadIndexedFloat(obj.GetTypeInfo(), p, idx.iVal, value))
+            return Value::MakeFloat(value);
 
         return Value::MakeNull();
     }
@@ -766,9 +735,9 @@ public:
     CastNode(std::string typeName, NodePtr child) :
         m_typeName(std::move(typeName)), m_child(std::move(child)) {}
 
-    Value Evaluate(asIScriptContext* ctx, asUINT stackLevel) const override
+    Value Evaluate(asIScriptContext* ctx, asUINT stackLevel, const asIDBHostAdapter& adapter) const override
     {
-        Value v = m_child->Evaluate(ctx, stackLevel);
+        Value v = m_child->Evaluate(ctx, stackLevel, adapter);
         if (!ctx || !ctx->GetEngine())
             return v;
 
@@ -782,7 +751,7 @@ public:
     }
 };
 
-inline Value IdentifierNode::ResolveMember(const Value& objVal, const std::string& memberName, asIScriptEngine* engine)
+inline Value IdentifierNode::ResolveMember(const Value& objVal, const std::string& memberName, asIScriptEngine* engine, const asIDBHostAdapter& adapter)
 {
     void* objPtr = objVal.ResolvePointer();
     if (!objPtr || !engine || objVal.typeId == 0)
@@ -791,38 +760,20 @@ inline Value IdentifierNode::ResolveMember(const Value& objVal, const std::strin
     // Zero-argument inspection whitelist on containers:
     if (memberName == "length" || memberName == "size" || memberName == "Length" || memberName == "Size" || memberName == "getSize")
     {
-        asITypeInfo* ti = engine->GetTypeInfoById(objVal.typeId);
-        if (ti)
-        {
-            std::string_view tname(ti->GetName());
-            if (tname == "string")
-            {
-                char   buf[1];
-                size_t len       = 0;
-                bool   truncated = false;
-                if (SafeReadCString(objPtr, buf, 0, len, truncated) ||
-                    SafeReadStdString(objPtr, buf, 0, len, truncated))
-                {
-                    return Value::MakeInt(static_cast<int64_t>(len));
-                }
-            }
-            if (tname == "array")
-            {
-                size_t count = 0; void* d = nullptr; int eid = 0, esz = 0;
-                if (SafeInspectScriptArray(objPtr, count, d, eid, esz))
-                    return Value::MakeInt(static_cast<int64_t>(count));
-            }
-        }
+        size_t len = 0;
+        if (objVal.IsScriptString() && objVal.ReadString(objPtr, nullptr, 0, len))
+            return Value::MakeInt(static_cast<int64_t>(len));
+
+        auto           type = objVal.GetTypeInfo();
+        asIDBArrayView array;
+        if (adapter.InspectArray(type, objPtr, array, asIDBInspection::Member))
+            return Value::MakeInt(static_cast<int64_t>(array.count));
     }
     if (memberName == "isEmpty" || memberName == "IsEmpty")
     {
-        asITypeInfo* ti = engine->GetTypeInfoById(objVal.typeId);
-        if (ti && std::string_view(ti->GetName()) == "string")
-        {
-            char   buf[1]; size_t len = 0; bool tr = false;
-            if (SafeReadCString(objPtr, buf, 0, len, tr) || SafeReadStdString(objPtr, buf, 0, len, tr))
-                return Value::MakeBool(len == 0);
-        }
+        size_t len = 0;
+        if (objVal.IsScriptString() && objVal.ReadString(objPtr, nullptr, 0, len))
+            return Value::MakeBool(len == 0);
     }
 
     asITypeInfo* type = engine->GetTypeInfoById(objVal.typeId);
@@ -842,7 +793,7 @@ inline Value IdentifierNode::ResolveMember(const Value& objVal, const std::strin
             {
                 void* propAddr = sObj->GetAddressOfProperty(p);
                 bool  isH = (propTypeId & (asTYPEID_HANDLETOCONST | asTYPEID_OBJHANDLE)) != 0;
-                return Value::MakeAddress(propAddr, propTypeId, isH, engine);
+                return Value::MakeAddress(propAddr, propTypeId, isH, engine, adapter);
             }
         }
 
@@ -863,7 +814,7 @@ inline Value IdentifierNode::ResolveMember(const Value& objVal, const std::strin
             {
                 void* propAddr = sObj->GetAddressOfProperty(p);
                 bool  isH = (propTypeId & (asTYPEID_HANDLETOCONST | asTYPEID_OBJHANDLE)) != 0;
-                return Value::MakeAddress(propAddr, propTypeId, isH, engine);
+                return Value::MakeAddress(propAddr, propTypeId, isH, engine, adapter);
             }
         }
     }
@@ -895,7 +846,7 @@ inline Value IdentifierNode::ResolveMember(const Value& objVal, const std::strin
                 if (propAddr)
                 {
                     bool isH = (propTypeId & (asTYPEID_HANDLETOCONST | asTYPEID_OBJHANDLE)) != 0;
-                    return Value::MakeAddress(propAddr, propTypeId, isH, engine);
+                    return Value::MakeAddress(propAddr, propTypeId, isH, engine, adapter);
                 }
             }
         }
@@ -1481,14 +1432,14 @@ struct LogTemplate
         return lt;
     }
 
-    std::string Evaluate(asIScriptContext* ctx, asUINT stackLevel = 0) const
+    std::string Evaluate(asIScriptContext* ctx, asUINT stackLevel, const asIDBHostAdapter& adapter) const
     {
         std::string res;
         for (const auto& seg : segments)
         {
             if (seg.isExpr && seg.ast)
             {
-                Value v = seg.ast->Evaluate(ctx, stackLevel).DereferenceIfAddress();
+                Value v = seg.ast->Evaluate(ctx, stackLevel, adapter).DereferenceIfAddress();
                 res += v.ToString();
             }
             else
@@ -1501,3 +1452,5 @@ struct LogTemplate
 };
 
 } // namespace as_expr
+
+END_AS_NAMESPACE

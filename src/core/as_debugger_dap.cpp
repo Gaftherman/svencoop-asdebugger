@@ -63,7 +63,9 @@ public:
             response.supportsWriteMemoryRequest         = true;
             response.supportsDisassembleRequest         = true;
             response.supportsSteppingGranularity        = true;
-            response.supportsInstructionBreakpoints     = true;
+            // No setInstructionBreakpoints handler exists: cppdap drops the request without a reply and
+            // VS Code then waits forever before sending configurationDone.
+            response.supportsInstructionBreakpoints     = false;
             response.supportsExceptionInfoRequest       = true;
             response.supportsConditionalBreakpoints     = true;
             response.supportsHitConditionalBreakpoints  = true;

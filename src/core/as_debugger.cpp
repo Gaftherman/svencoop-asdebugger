@@ -1473,7 +1473,7 @@ void asIDBFileWorkspace::CompileBreakpointPositions()
     auto addFunctionBreakpointLocations = [&](asIScriptFunction* func) {
         if (!func)
             return;
-#if ANGELSCRIPT_VERSION >= 23800
+#if ANGELSCRIPT_VERSION >= 23900
         for (int i = 0; i < func->GetLineEntryCount(); i++)
         {
             const char* section = nullptr;
@@ -1485,7 +1485,12 @@ void asIDBFileWorkspace::CompileBreakpointPositions()
             }
         }
 #else
+#if ANGELSCRIPT_VERSION >= 23800
+        const char* section = nullptr;
+        func->GetDeclaredAt(&section, nullptr, nullptr);
+#else
         const char* section = func->GetScriptSectionName();
+#endif
         if (section && *section)
         {
             int line = func->FindNextLineWithCode(1);
@@ -1731,7 +1736,7 @@ void asIDBFileWorkspace::CompileBreakpointPositions()
 
             if (func && debugger->function_breakpoints.find(func->GetName()) != debugger->function_breakpoints.end())
             {
-#if ANGELSCRIPT_VERSION >= 23800
+#if ANGELSCRIPT_VERSION >= 23900
                 int declarationLine = 0;
                 func->GetDeclaredAt(nullptr, &declarationLine, nullptr);
                 const int entries = func->GetLineEntryCount();

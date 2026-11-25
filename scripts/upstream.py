@@ -1,4 +1,5 @@
 """Detect and publish validated ASExt release updates; no third-party packages."""
+
 import argparse
 import json
 import os
@@ -11,8 +12,7 @@ import urllib.request
 
 
 def git(root, *args, check=True):
-    return subprocess.run(["git", "-C", str(root), *args], check=check,
-                          capture_output=True, text=True)
+    return subprocess.run(["git", "-C", str(root), *args], check=check, capture_output=True, text=True)
 
 
 def sha(value):
@@ -25,9 +25,12 @@ def api(path, missing_ok=False):
     token = os.environ.get("GH_TOKEN", "")
     request = urllib.request.Request(
         "https://api.github.com/" + path,
-        headers={"Accept": "application/vnd.github+json",
-                 "Authorization": "Bearer " + token,
-                 "X-GitHub-Api-Version": "2022-11-28"})
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": "Bearer " + token,
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.load(response)
@@ -48,10 +51,17 @@ def release_candidate(repository, branch, base, release, existing_tag, resolve):
     if existing_tag(tag):
         return None
     asext_sha, metamod_sha = resolve(release["tag_name"])
-    return {"repository": repository, "branch": branch, "base_sha": sha(base),
-            "release_id": release_id, "release_tag": release["tag_name"],
-            "release_url": release["html_url"], "template_tag": tag,
-            "asext_sha": sha(asext_sha), "metamod_sha": sha(metamod_sha)}
+    return {
+        "repository": repository,
+        "branch": branch,
+        "base_sha": sha(base),
+        "release_id": release_id,
+        "release_tag": release["tag_name"],
+        "release_url": release["html_url"],
+        "template_tag": tag,
+        "asext_sha": sha(asext_sha),
+        "metamod_sha": sha(metamod_sha),
+    }
 
 
 def detect(root, repository, branch):
@@ -69,9 +79,9 @@ def detect(root, repository, branch):
         metamod = api("repos/metamod-fallguys/metamod/commits/main")["sha"]
         return asext, metamod
 
-    return release_candidate(repository, branch,
-                             git(root, "rev-parse", "HEAD").stdout.strip(),
-                             release, existing, resolve)
+    return release_candidate(
+        repository, branch, git(root, "rev-parse", "HEAD").stdout.strip(), release, existing, resolve
+    )
 
 
 def checkout_dependencies(root, asext_sha, metamod_sha):
@@ -105,13 +115,22 @@ def publish(root, candidate, repository, branch, validated=False):
     if difference.returncode not in (0, 1):
         raise subprocess.CalledProcessError(difference.returncode, difference.args, stderr=difference.stderr)
     if difference.returncode == 1:
-        message = (f"chore(deps): update for asext release {candidate['release_id']}\n\n"
-                   f"ASExt release: {candidate['release_url']}\n"
-                   f"ASExt: {candidate['asext_sha']}\nMetamod: {candidate['metamod_sha']}\n\n"
-                   "Co-Authored-By: Codex <codex@openai.com>")
-        git(root, "-c", "user.name=github-actions[bot]", "-c",
+        message = (
+            f"chore(deps): update for asext release {candidate['release_id']}\n\n"
+            f"ASExt release: {candidate['release_url']}\n"
+            f"ASExt: {candidate['asext_sha']}\nMetamod: {candidate['metamod_sha']}\n\n"
+            "Co-Authored-By: Codex <codex@openai.com>"
+        )
+        git(
+            root,
+            "-c",
+            "user.name=github-actions[bot]",
+            "-c",
             "user.email=41898282+github-actions[bot]@users.noreply.github.com",
-            "commit", "-m", message)
+            "commit",
+            "-m",
+            message,
+        )
     git(root, "tag", tag)
     # No force: a competing branch update rejects the entire atomic push.
     git(root, "push", "--atomic", "origin", "HEAD:refs/heads/" + branch, "refs/tags/" + tag)

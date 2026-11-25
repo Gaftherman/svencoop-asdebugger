@@ -1,10 +1,14 @@
 # asdebugger
 
 A native AngelScript debugger with a TCP Debug Adapter Protocol (DAP) server powered by
-[cppdap](https://github.com/google/cppdap). The static library `asdebugger_core` lives in
-`src/core/` and can be embedded in a C++ host using AngelScript 2.39.0. The Sven Co-op
-plugin lives in `src/sven/` and uses [metamod-fallguys](https://github.com/hzqst/metamod-fallguys)
-and ASExt to connect to the game's VM.
+[cppdap](https://github.com/google/cppdap). The host-agnostic core (`asdebugger_core`) lives in
+[angelscript-dap](https://github.com/Gaftherman/angelscript-dap), shared with the
+[AngelScript CLI](https://github.com/Gaftherman/angelscript-cli) and the
+[example project](https://github.com/Gaftherman/angelscript-debugger-example), and is pulled
+in here as the `external/angelscript-dap` submodule. This repository is
+the Sven Co-op plugin: it lives in `src/sven/` and uses
+[metamod-fallguys](https://github.com/hzqst/metamod-fallguys) and ASExt to connect to the
+game's VM, against the AngelScript headers that Metamod pins.
 
 Developed by **Gaftherman** ([asdebugger](https://github.com/Gaftherman/asdebugger)).
 
@@ -32,8 +36,8 @@ installing the resulting package requires no separate Metamod DLL download.
 
 ## Build the Sven Co-op plugin
 
-`ASDEBUGGER_BUILD_SVEN_PLUGIN` defaults to ON when configuring this repository
-directly. That build uses the Sven SDK's AngelScript ABI.
+The plugin uses the Sven SDK's AngelScript ABI. To build against a local checkout of the
+core, pass `-DASDEBUGGER_CORE_DIR=<path>/angelscript-dap`.
 
 Requirements: Git, CMake 3.21+, Python 3.8+ (3.12 for repository tests), internet
 access for the first dependency/gamedata download, and a 32-bit toolchain.
@@ -82,17 +86,17 @@ in `build/packages/`.
 
 ## Using the core in your own host
 
-Add AngelScript 2.39.0 and asdebugger to your CMake project. The core requires a
-C++20 compiler and standard library with `std::format`, CMake 3.21+, Git, and
-Python 3 for the cppdap patch. The Sven plugin defaults to OFF in a subdirectory
-build. The core configuration works without the Metamod and ASExt submodules.
+The core lives in [angelscript-dap](https://github.com/Gaftherman/angelscript-dap), and the
+[example project](https://github.com/Gaftherman/angelscript-debugger-example) has a working host. Add AngelScript and the core to your CMake
+project. The core requires a C++20 compiler and standard library with `std::format`,
+CMake 3.21+, Git, and Python 3 for the cppdap patch.
 
 ```cmake
 # ANGELSCRIPT_SDK points to the sdk/ directory from the AngelScript v2.39.0 tag.
 add_subdirectory("${ANGELSCRIPT_SDK}/angelscript/projects/cmake" angelscript)
 set(ASDEBUGGER_STD_ADAPTER ON)
 set(ASDEBUGGER_STD_ADDON_DIR "${ANGELSCRIPT_SDK}/add_on")
-add_subdirectory(external/asdebugger)
+add_subdirectory(external/angelscript-dap asdebugger)
 
 add_executable(my_host main.cpp)
 foreach(addon IN ITEMS scriptstdstring scriptarray scriptdictionary)
@@ -105,12 +109,12 @@ target_link_libraries(my_host PRIVATE asdebugger_core)
 Configure the parent project with `cmake -S . -B build` and build the host with
 `cmake --build build --config Release`. To build just the library, add
 `--target asdebugger_core`. The default AngelScript target name is `angelscript`.
-Set `ASDEBUGGER_ANGELSCRIPT_TARGET` before `add_subdirectory(external/asdebugger)`
+Set `ASDEBUGGER_ANGELSCRIPT_TARGET` before `add_subdirectory(.../core)`
 if your target has another name.
 
 The standard adapter uses the vanilla string, array, and dictionary add-ons. The
 host compiles the add-on sources as shown above. For custom bindings, implement
-`asIDBHostAdapter` in `src/core/as_debugger_host.h` and leave
+`asIDBHostAdapter` in `src/as_debugger_host.h` of angelscript-dap and leave
 `ASDEBUGGER_STD_ADAPTER` OFF.
 
 Run this example in a directory containing a `main.as` file with a
@@ -279,4 +283,4 @@ cmake --build build/format --target format-check
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
-See [THIRD_PARTY.md](THIRD_PARTY.md) for preserved dependency notices (Metamod, ASExt, cppdap, HLSDK).
+See [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) for preserved dependency notices (Metamod, ASExt, cppdap, HLSDK).

@@ -6,3 +6,6 @@
 	path = asext
 	url = https://github.com/metamod-fallguys/asext.git
 	ignore = dirty
+[submodule "external/angelscript-dap"]
+	path = external/angelscript-dap
+	url = https://github.com/Gaftherman/angelscript-dap

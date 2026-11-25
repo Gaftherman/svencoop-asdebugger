@@ -1,4 +1,5 @@
 """Exercise update decisions and real Git publication without GitHub writes."""
+
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -7,7 +8,7 @@ import unittest
 from unittest.mock import patch
 import urllib.error
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts/upstream.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "upstream.py"
 SPEC = importlib.util.spec_from_file_location("upstream", SCRIPT)
 upstream = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(upstream)
@@ -18,8 +19,9 @@ RELEASE = {"id": 42, "tag_name": "v1.0", "html_url": "https://github.com/metamod
 
 class Decisions(unittest.TestCase):
     def candidate(self, release=RELEASE, exists=False):
-        return upstream.release_candidate("owner/template", "main", SHA_A, release,
-                                          lambda tag: exists, lambda tag: (SHA_A, SHA_B))
+        return upstream.release_candidate(
+            "owner/template", "main", SHA_A, release, lambda tag: exists, lambda tag: (SHA_A, SHA_B)
+        )
 
     def test_no_release(self):
         self.assertIsNone(self.candidate(None))

@@ -1,4 +1,5 @@
 """Verify and package a complete installed x86 plugin payload."""
+
 import argparse
 import json
 import os
@@ -33,7 +34,7 @@ def pe_exports(data, offset):
     exports = set()
     for index in range(name_count):
         name = file_offset(struct.unpack_from("<I", data, names + index * 4)[0])
-        exports.add(data[name:data.index(b"\0", name)].decode("ascii"))
+        exports.add(data[name : data.index(b"\0", name)].decode("ascii"))
     return exports
 
 
@@ -45,7 +46,11 @@ def verify(prefix, platform):
         data = library.read_bytes()
         if platform == "windows":
             offset = struct.unpack_from("<I", data, 0x3C)[0]
-            if data[:2] != b"MZ" or data[offset:offset + 4] != b"PE\0\0" or struct.unpack_from("<H", data, offset + 4)[0] != 0x14C:
+            if (
+                data[:2] != b"MZ"
+                or data[offset : offset + 4] != b"PE\0\0"
+                or struct.unpack_from("<H", data, offset + 4)[0] != 0x14C
+            ):
                 raise ValueError(f"Not an x86 PE library: {library}")
             pdb = dlls / (component + ".pdb")
             if not pdb.is_file() or not pdb.stat().st_size:
@@ -54,15 +59,24 @@ def verify(prefix, platform):
         elif data[:5] != b"\x7fELF\x01" or struct.unpack_from("<H", data, 18)[0] != 3:
             raise ValueError(f"Not an i386 ELF library: {library}")
         else:
-            output = subprocess.run(["nm", "-D", "--defined-only", str(library)],
-                                    check=True, capture_output=True, text=True).stdout
+            output = subprocess.run(
+                ["nm", "-D", "--defined-only", str(library)], check=True, capture_output=True, text=True
+            ).stdout
             exports = {line.split()[-1] for line in output.splitlines() if line.strip()}
         required = {"GetEntityAPI2"} if component == "metamod" else {"Meta_Query", "Meta_Attach", "Meta_Detach"}
         if not required <= exports or not {"GiveFnptrsToDll", "_GiveFnptrsToDll@8"} & exports:
             raise ValueError(f"Missing engine/Metamod entrypoints: {library}")
-        if component == "asext" and not {"ASEXT_RegisterDocInitCallback", "ASEXT_RegisterScriptBuilderDefineCallback",
-                                        "ASEXT_UnregisterScriptBuilderDefineCallback", "ASEXT_RegisterGlobalFunction",
-                                        "ASEXT_CScriptBuilder_DefineWord"} <= exports:
+        if (
+            component == "asext"
+            and not {
+                "ASEXT_RegisterDocInitCallback",
+                "ASEXT_RegisterScriptBuilderDefineCallback",
+                "ASEXT_UnregisterScriptBuilderDefineCallback",
+                "ASEXT_RegisterGlobalFunction",
+                "ASEXT_CScriptBuilder_DefineWord",
+            }
+            <= exports
+        ):
             raise ValueError("ASExt is missing the required API exports")
     gamedata = prefix / "addons/metamod/gamedata/asext"
     catalogs = list(gamedata.rglob("*.json"))
@@ -70,7 +84,13 @@ def verify(prefix, platform):
         raise ValueError("ASExt gamedata is missing")
     for catalog in catalogs:
         json.loads(catalog.read_text(encoding="utf-8"))
-    for file in ("addons/metamod/plugins.ini.example", "scripts/plugins/asdebugger_example.as", "README.md", "LICENSE", "THIRD_PARTY.md"):
+    for file in (
+        "addons/metamod/plugins.ini.example",
+        "scripts/plugins/asdebugger_example.as",
+        "README.md",
+        "LICENSE",
+        "THIRD_PARTY.md",
+    ):
         if not (prefix / file).is_file():
             raise ValueError(f"Missing installed file: {file}")
 
@@ -121,13 +141,20 @@ def main():
     output = root / "build/packages"
     output.mkdir(parents=True, exist_ok=True)
     source = git(root, "rev-parse", "HEAD", check=False)
-    metadata = {"repository": os.environ.get("GITHUB_REPOSITORY", "Gaftherman/asdebugger"),
-                "source_sha": source.stdout.strip() if source.returncode == 0 else None,
-                "uncommitted": bool(git(root, "status", "--porcelain").stdout.strip()),
-                "platform": args.platform, "configuration": args.config,
-                "components": {name: {"sha": git(root / name, "rev-parse", "HEAD").stdout.strip(),
-                                      "url": git(root / name, "remote", "get-url", "origin").stdout.strip()}
-                               for name in ("metamod", "asext")}}
+    metadata = {
+        "repository": os.environ.get("GITHUB_REPOSITORY", "Gaftherman/asdebugger"),
+        "source_sha": source.stdout.strip() if source.returncode == 0 else None,
+        "uncommitted": bool(git(root, "status", "--porcelain").stdout.strip()),
+        "platform": args.platform,
+        "configuration": args.config,
+        "components": {
+            name: {
+                "sha": git(root / name, "rev-parse", "HEAD").stdout.strip(),
+                "url": git(root / name, "remote", "get-url", "origin").stdout.strip(),
+            }
+            for name in ("metamod", "asext")
+        },
+    }
     with tempfile.TemporaryDirectory(prefix="asdebugger-package-") as temporary:
         stage = Path(temporary)
         shutil.copytree(prefix, stage / "build")
